@@ -12,6 +12,9 @@ import {
   Ship,
   ChevronDown,
   ChevronUp,
+  AlertTriangle,
+  CloudSun,
+  Calendar,
 } from 'lucide-react';
 import { useState } from 'react';
 
@@ -52,6 +55,35 @@ export default function VoyageResults({ voyage }: VoyageResultsProps) {
 
   return (
     <div className="space-y-4">
+      {/* Data Source Warning */}
+      {voyage.data_sources?.warning && (
+        <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 flex items-start space-x-3">
+          <AlertTriangle className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
+          <div>
+            <div className="text-sm font-medium text-yellow-400">Weather Data Notice</div>
+            <div className="text-xs text-yellow-300/80 mt-1">{voyage.data_sources.warning}</div>
+            <div className="text-xs text-gray-400 mt-2 flex items-center space-x-4">
+              <span className="flex items-center space-x-1">
+                <CloudSun className="w-3 h-3" />
+                <span>Forecast: {voyage.data_sources.forecast_legs} legs</span>
+              </span>
+              {voyage.data_sources.blended_legs > 0 && (
+                <span className="flex items-center space-x-1">
+                  <span className="w-2 h-2 rounded-full bg-yellow-500" />
+                  <span>Blended: {voyage.data_sources.blended_legs}</span>
+                </span>
+              )}
+              {voyage.data_sources.climatology_legs > 0 && (
+                <span className="flex items-center space-x-1">
+                  <Calendar className="w-3 h-3" />
+                  <span>Climatology: {voyage.data_sources.climatology_legs}</span>
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Summary Header */}
       <div className="bg-gradient-to-r from-primary-500/20 to-ocean-500/20 rounded-lg p-4 border border-primary-500/30">
         <h3 className="text-lg font-semibold text-white mb-3">Voyage Summary</h3>
@@ -205,6 +237,23 @@ function LegRow({
       ? 'text-yellow-400'
       : 'text-red-400';
 
+  // Data source indicator color
+  const getDataSourceStyle = () => {
+    if (!leg.data_source) return { bg: 'bg-primary-500/20', text: 'text-primary-400' };
+    switch (leg.data_source) {
+      case 'forecast':
+        return { bg: 'bg-green-500/20', text: 'text-green-400', icon: '☀' };
+      case 'blended':
+        return { bg: 'bg-yellow-500/20', text: 'text-yellow-400', icon: '◐' };
+      case 'climatology':
+        return { bg: 'bg-orange-500/20', text: 'text-orange-400', icon: '📊' };
+      default:
+        return { bg: 'bg-primary-500/20', text: 'text-primary-400' };
+    }
+  };
+
+  const sourceStyle = getDataSourceStyle();
+
   return (
     <div className="border border-white/5 rounded-lg overflow-hidden">
       {/* Collapsed Header */}
@@ -213,7 +262,8 @@ function LegRow({
         className="w-full flex items-center justify-between p-3 hover:bg-maritime-light/50 transition-colors"
       >
         <div className="flex items-center space-x-3">
-          <span className="w-6 h-6 rounded-full bg-primary-500/20 flex items-center justify-center text-xs text-primary-400 font-semibold">
+          <span className={`w-6 h-6 rounded-full ${sourceStyle.bg} flex items-center justify-center text-xs ${sourceStyle.text} font-semibold`}
+            title={leg.data_source ? `Weather: ${leg.data_source}` : undefined}>
             {leg.leg_index + 1}
           </span>
           <div className="text-left">

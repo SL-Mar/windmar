@@ -144,6 +144,17 @@ export interface LegResult {
   arrival_time: string;
   fuel_mt: number;
   power_kw: number;
+  // Data source info
+  data_source?: 'forecast' | 'blended' | 'climatology';
+  forecast_weight?: number;
+}
+
+export interface DataSourceSummary {
+  forecast_legs: number;
+  blended_legs: number;
+  climatology_legs: number;
+  forecast_horizon_days: number;
+  warning?: string;
 }
 
 export interface VoyageResponse {
@@ -158,6 +169,8 @@ export interface VoyageResponse {
   legs: LegResult[];
   calm_speed_kts: number;
   is_laden: boolean;
+  // Data source summary
+  data_sources?: DataSourceSummary;
 }
 
 // Vessel types

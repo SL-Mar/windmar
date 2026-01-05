@@ -31,7 +31,10 @@ from src.routes.rtz_parser import (
     Route, Waypoint, parse_rtz_string, create_route_from_waypoints,
     haversine_distance, calculate_bearing
 )
-from src.data.copernicus import CopernicusDataProvider, SyntheticDataProvider, WeatherData
+from src.data.copernicus import (
+    CopernicusDataProvider, SyntheticDataProvider, WeatherData,
+    ClimatologyProvider, UnifiedWeatherProvider, WeatherDataSource
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -116,6 +119,19 @@ class LegResultModel(BaseModel):
     fuel_mt: float
     power_kw: float
 
+    # Data source info (forecast, climatology, blended)
+    data_source: Optional[str] = None
+    forecast_weight: Optional[float] = None
+
+
+class DataSourceSummary(BaseModel):
+    """Summary of data sources used in voyage calculation."""
+    forecast_legs: int
+    blended_legs: int
+    climatology_legs: int
+    forecast_horizon_days: float
+    warning: Optional[str] = None
+
 
 class VoyageResponse(BaseModel):
     """Complete voyage calculation response."""
@@ -133,6 +149,9 @@ class VoyageResponse(BaseModel):
 
     calm_speed_kts: float
     is_laden: bool
+
+    # Data source summary
+    data_sources: Optional[DataSourceSummary] = None
 
 
 class WindDataPoint(BaseModel):
@@ -189,6 +208,16 @@ voyage_calculator = VoyageCalculator(vessel_model=current_vessel_model)
 # Initialize data providers
 # Copernicus provider (attempts real API if configured)
 copernicus_provider = CopernicusDataProvider(cache_dir="data/copernicus_cache")
+
+# Climatology provider (for beyond-forecast-horizon)
+climatology_provider = ClimatologyProvider(cache_dir="data/climatology_cache")
+
+# Unified provider (blends forecast + climatology)
+unified_weather_provider = UnifiedWeatherProvider(
+    copernicus=copernicus_provider,
+    climatology=climatology_provider,
+    cache_dir="data/weather_cache",
+)
 
 # Synthetic fallback provider (always works)
 synthetic_provider = SyntheticDataProvider()
@@ -309,40 +338,76 @@ def get_current_field(
     return current_data
 
 
-def get_weather_at_point(lat: float, lon: float, time: datetime) -> Dict:
+def get_weather_at_point(lat: float, lon: float, time: datetime) -> Tuple[Dict, Optional[WeatherDataSource]]:
     """
     Get weather at a specific point.
 
-    Uses cached grid data for interpolation.
+    Uses unified provider that blends forecast and climatology.
+
+    Returns:
+        Tuple of (weather_dict, data_source) where data_source indicates
+        whether data is from forecast, climatology, or blended.
     """
-    # Define region around the point
-    margin = 2.0
-    lat_min, lat_max = lat - margin, lat + margin
-    lon_min, lon_max = lon - margin, lon + margin
+    try:
+        # Use unified provider - handles forecast/climatology transition
+        point_wx, source = unified_weather_provider.get_weather_at_point(lat, lon, time)
 
-    # Get grid data
-    wind_data = get_wind_field(lat_min, lat_max, lon_min, lon_max, 0.5, time)
-    wave_data = get_wave_field(lat_min, lat_max, lon_min, lon_max, 0.5, wind_data)
-    current_data = get_current_field(lat_min, lat_max, lon_min, lon_max)
+        return {
+            'wind_speed_ms': point_wx.wind_speed_ms,
+            'wind_dir_deg': point_wx.wind_dir_deg,
+            'sig_wave_height_m': point_wx.wave_height_m,
+            'wave_dir_deg': point_wx.wave_dir_deg,
+            'current_speed_ms': point_wx.current_speed_ms,
+            'current_dir_deg': point_wx.current_dir_deg,
+        }, source
 
-    # Interpolate at point
-    point_wx = copernicus_provider.get_weather_at_point(
-        lat, lon, time, wind_data, wave_data, current_data
-    )
+    except Exception as e:
+        logger.warning(f"Unified provider failed, falling back to grid method: {e}")
 
-    return {
-        'wind_speed_ms': point_wx.wind_speed_ms,
-        'wind_dir_deg': point_wx.wind_dir_deg,
-        'sig_wave_height_m': point_wx.wave_height_m,
-        'wave_dir_deg': point_wx.wave_dir_deg,
-        'current_speed_ms': point_wx.current_speed_ms,
-        'current_dir_deg': point_wx.current_dir_deg,
-    }
+        # Fallback to direct grid method
+        margin = 2.0
+        lat_min, lat_max = lat - margin, lat + margin
+        lon_min, lon_max = lon - margin, lon + margin
+
+        wind_data = get_wind_field(lat_min, lat_max, lon_min, lon_max, 0.5, time)
+        wave_data = get_wave_field(lat_min, lat_max, lon_min, lon_max, 0.5, wind_data)
+        current_data = get_current_field(lat_min, lat_max, lon_min, lon_max)
+
+        point_wx = copernicus_provider.get_weather_at_point(
+            lat, lon, time, wind_data, wave_data, current_data
+        )
+
+        return {
+            'wind_speed_ms': point_wx.wind_speed_ms,
+            'wind_dir_deg': point_wx.wind_dir_deg,
+            'sig_wave_height_m': point_wx.wave_height_m,
+            'wave_dir_deg': point_wx.wave_dir_deg,
+            'current_speed_ms': point_wx.current_speed_ms,
+            'current_dir_deg': point_wx.current_dir_deg,
+        }, None
+
+
+# Track data sources for each leg during voyage calculation
+_voyage_data_sources: List[Dict] = []
 
 
 def weather_provider(lat: float, lon: float, time: datetime) -> LegWeather:
     """Weather provider function for voyage calculator."""
-    wx = get_weather_at_point(lat, lon, time)
+    global _voyage_data_sources
+
+    wx, source = get_weather_at_point(lat, lon, time)
+
+    # Track data source for this leg
+    if source:
+        _voyage_data_sources.append({
+            'lat': lat,
+            'lon': lon,
+            'time': time.isoformat(),
+            'source': source.source,
+            'forecast_weight': source.forecast_weight,
+            'message': source.message,
+        })
+
     return LegWeather(
         wind_speed_ms=wx['wind_speed_ms'],
         wind_dir_deg=wx['wind_dir_deg'],
@@ -731,7 +796,14 @@ async def calculate_voyage(request: VoyageRequest):
 
     Takes waypoints, calm speed, and vessel condition.
     Returns detailed per-leg results including weather impact.
+
+    Weather data is sourced from:
+    - Forecast: Copernicus data for first 10 days
+    - Blended: Transition from forecast to climatology (days 10-12)
+    - Climatology: ERA5 monthly averages beyond forecast horizon
     """
+    global _voyage_data_sources
+
     if len(request.waypoints) < 2:
         raise HTTPException(status_code=400, detail="At least 2 waypoints required")
 
@@ -740,6 +812,9 @@ async def calculate_voyage(request: VoyageRequest):
     # Create route from waypoints
     wps = [(wp.lat, wp.lon) for wp in request.waypoints]
     route = create_route_from_waypoints(wps, "Voyage Route")
+
+    # Reset data source tracking
+    _voyage_data_sources = []
 
     # Calculate voyage
     wp_func = weather_provider if request.use_weather else None
@@ -752,9 +827,37 @@ async def calculate_voyage(request: VoyageRequest):
         weather_provider=wp_func,
     )
 
-    # Format response
+    # Build data source summary
+    forecast_legs = sum(1 for ds in _voyage_data_sources if ds['source'] == 'forecast')
+    blended_legs = sum(1 for ds in _voyage_data_sources if ds['source'] == 'blended')
+    climatology_legs = sum(1 for ds in _voyage_data_sources if ds['source'] == 'climatology')
+
+    data_source_warning = None
+    if climatology_legs > 0:
+        data_source_warning = (
+            f"Voyage extends beyond {ClimatologyProvider.FORECAST_HORIZON_DAYS}-day forecast horizon. "
+            f"{climatology_legs} leg(s) use climatological averages with higher uncertainty."
+        )
+    elif blended_legs > 0:
+        data_source_warning = (
+            f"Voyage approaches forecast horizon. "
+            f"{blended_legs} leg(s) use blended forecast/climatology data."
+        )
+
+    data_sources_summary = DataSourceSummary(
+        forecast_legs=forecast_legs,
+        blended_legs=blended_legs,
+        climatology_legs=climatology_legs,
+        forecast_horizon_days=ClimatologyProvider.FORECAST_HORIZON_DAYS,
+        warning=data_source_warning,
+    ) if request.use_weather else None
+
+    # Format response with data source info per leg
     legs_response = []
-    for leg in result.legs:
+    for i, leg in enumerate(result.legs):
+        # Get data source info for this leg
+        leg_source = _voyage_data_sources[i] if i < len(_voyage_data_sources) else None
+
         legs_response.append(LegResultModel(
             leg_index=leg.leg_index,
             from_wp=WaypointModel(
@@ -784,6 +887,8 @@ async def calculate_voyage(request: VoyageRequest):
             arrival_time=leg.arrival_time,
             fuel_mt=round(leg.fuel_mt, 2),
             power_kw=round(leg.power_kw, 0),
+            data_source=leg_source['source'] if leg_source else None,
+            forecast_weight=leg_source['forecast_weight'] if leg_source else None,
         ))
 
     return VoyageResponse(
@@ -798,6 +903,7 @@ async def calculate_voyage(request: VoyageRequest):
         legs=legs_response,
         calm_speed_kts=request.calm_speed_kts,
         is_laden=request.is_laden,
+        data_sources=data_sources_summary,
     )
 
 
