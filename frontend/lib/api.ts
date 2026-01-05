@@ -241,6 +241,57 @@ export interface VesselSpecs {
   service_speed_ballast: number;
 }
 
+// Zone types
+export type ZoneType = 'eca' | 'seca' | 'hra' | 'tss' | 'vts' | 'exclusion' | 'environmental' | 'ice' | 'canal' | 'custom';
+export type ZoneInteraction = 'mandatory' | 'exclusion' | 'penalty' | 'advisory';
+
+export interface ZoneCoordinate {
+  lat: number;
+  lon: number;
+}
+
+export interface ZoneProperties {
+  name: string;
+  zone_type: ZoneType;
+  interaction: ZoneInteraction;
+  penalty_factor: number;
+  is_builtin: boolean;
+  notes?: string;
+}
+
+export interface ZoneFeature {
+  type: 'Feature';
+  id: string;
+  properties: ZoneProperties;
+  geometry: {
+    type: 'Polygon';
+    coordinates: number[][][]; // [lon, lat] arrays
+  };
+}
+
+export interface ZoneGeoJSON {
+  type: 'FeatureCollection';
+  features: ZoneFeature[];
+}
+
+export interface CreateZoneRequest {
+  name: string;
+  zone_type: ZoneType;
+  interaction: ZoneInteraction;
+  coordinates: ZoneCoordinate[];
+  penalty_factor?: number;
+  notes?: string;
+}
+
+export interface ZoneListItem {
+  id: string;
+  name: string;
+  zone_type: ZoneType;
+  interaction: ZoneInteraction;
+  penalty_factor: number;
+  is_builtin: boolean;
+}
+
 // ============================================================================
 // API Functions
 // ============================================================================
@@ -380,6 +431,44 @@ export const apiClient = {
 
   async updateVesselSpecs(specs: VesselSpecs): Promise<{ status: string; message: string }> {
     const response = await api.post('/api/vessel/specs', specs);
+    return response.data;
+  },
+
+  // -------------------------------------------------------------------------
+  // Zones API (Regulatory Zones)
+  // -------------------------------------------------------------------------
+
+  async getZones(): Promise<ZoneGeoJSON> {
+    const response = await api.get<ZoneGeoJSON>('/api/zones');
+    return response.data;
+  },
+
+  async getZonesList(): Promise<{ zones: ZoneListItem[]; count: number }> {
+    const response = await api.get('/api/zones/list');
+    return response.data;
+  },
+
+  async createZone(request: CreateZoneRequest): Promise<ZoneListItem> {
+    const response = await api.post<ZoneListItem>('/api/zones', request);
+    return response.data;
+  },
+
+  async deleteZone(zoneId: string): Promise<{ status: string; zone_id: string }> {
+    const response = await api.delete(`/api/zones/${zoneId}`);
+    return response.data;
+  },
+
+  async getZonesAtPoint(lat: number, lon: number): Promise<{
+    position: Position;
+    zones: Array<{
+      id: string;
+      name: string;
+      zone_type: ZoneType;
+      interaction: ZoneInteraction;
+      penalty_factor: number;
+    }>;
+  }> {
+    const response = await api.get('/api/zones/at-point', { params: { lat, lon } });
     return response.data;
   },
 };

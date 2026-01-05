@@ -26,8 +26,10 @@ import {
   AlertTriangle,
   CheckCircle,
   ShieldAlert,
+  Shield,
+  PenTool,
 } from 'lucide-react';
-import { apiClient, Position, WindFieldData, VoyageResponse, OptimizationResponse } from '@/lib/api';
+import { apiClient, Position, WindFieldData, VoyageResponse, OptimizationResponse, CreateZoneRequest } from '@/lib/api';
 
 // Dynamic imports for map components (client-side only)
 const MapContainer = dynamic(
@@ -43,6 +45,14 @@ const WaypointEditor = dynamic(() => import('@/components/WaypointEditor'), {
 });
 const WindLayer = dynamic(
   () => import('@/components/WindLayer'),
+  { ssr: false }
+);
+const ZoneLayer = dynamic(
+  () => import('@/components/ZoneLayer'),
+  { ssr: false }
+);
+const ZoneEditor = dynamic(
+  () => import('@/components/ZoneEditor'),
   { ssr: false }
 );
 
@@ -78,6 +88,11 @@ export default function HomePage() {
   const [weatherLayer, setWeatherLayer] = useState<WeatherLayer>('wind');
   const [windData, setWindData] = useState<WindFieldData | null>(null);
   const [isLoadingWeather, setIsLoadingWeather] = useState(false);
+
+  // Zone state
+  const [showZones, setShowZones] = useState(true);
+  const [isDrawingZone, setIsDrawingZone] = useState(false);
+  const [zoneKey, setZoneKey] = useState(0); // Force re-render of zones
 
   // Load weather data
   const loadWeatherData = useCallback(async () => {
@@ -199,6 +214,13 @@ export default function HomePage() {
       setShowOptimizedRoute(false);
       setVoyageResult(null);
     }
+  };
+
+  // Save new zone
+  const handleSaveZone = async (request: CreateZoneRequest) => {
+    await apiClient.createZone(request);
+    setZoneKey(prev => prev + 1); // Force zone layer to reload
+    setIsDrawingZone(false);
   };
 
   // Calculate total distance
@@ -509,6 +531,36 @@ export default function HomePage() {
                 </button>
               </div>
             </Card>
+
+            {/* Regulatory Zones */}
+            <Card title="Regulatory Zones" icon={<Shield className="w-5 h-5" />}>
+              <div className="space-y-2">
+                <WeatherLayerButton
+                  icon={<Shield className="w-4 h-4" />}
+                  label="Show Zones"
+                  active={showZones}
+                  onClick={() => setShowZones(!showZones)}
+                />
+                <button
+                  onClick={() => setIsDrawingZone(!isDrawingZone)}
+                  className={`w-full flex items-center justify-between px-3 py-2 rounded-lg transition-colors ${
+                    isDrawingZone
+                      ? 'bg-amber-500/20 border border-amber-500/50 text-amber-400'
+                      : 'bg-maritime-dark text-gray-400 hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center space-x-2">
+                    <PenTool className="w-4 h-4" />
+                    <span className="text-sm">Draw Custom Zone</span>
+                  </div>
+                </button>
+                {isDrawingZone && (
+                  <p className="text-xs text-amber-400 px-2">
+                    Click on the map to draw a polygon, then fill in zone properties.
+                  </p>
+                )}
+              </div>
+            </Card>
           </div>
 
           {/* Center - Map */}
@@ -519,6 +571,11 @@ export default function HomePage() {
                 onWaypointsChange={setWaypoints}
                 isEditing={isEditing}
                 windData={weatherLayer === 'wind' ? windData : null}
+                showZones={showZones}
+                zoneKey={zoneKey}
+                isDrawingZone={isDrawingZone}
+                onSaveZone={handleSaveZone}
+                onCancelZone={() => setIsDrawingZone(false)}
               />
             </Card>
           </div>
@@ -594,11 +651,21 @@ function MapComponent({
   onWaypointsChange,
   isEditing,
   windData,
+  showZones = true,
+  zoneKey = 0,
+  isDrawingZone = false,
+  onSaveZone,
+  onCancelZone,
 }: {
   waypoints: Position[];
   onWaypointsChange: (wps: Position[]) => void;
   isEditing: boolean;
   windData: WindFieldData | null;
+  showZones?: boolean;
+  zoneKey?: number;
+  isDrawingZone?: boolean;
+  onSaveZone?: (request: CreateZoneRequest) => Promise<void>;
+  onCancelZone?: () => void;
 }) {
   const [isMounted, setIsMounted] = useState(false);
 
@@ -625,6 +692,18 @@ function MapComponent({
         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
         url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
       />
+
+      {/* Zone Layer */}
+      {showZones && <ZoneLayer key={zoneKey} visible={showZones} />}
+
+      {/* Zone Editor (drawing) */}
+      {isDrawingZone && onSaveZone && onCancelZone && (
+        <ZoneEditor
+          isDrawing={isDrawingZone}
+          onSaveZone={onSaveZone}
+          onCancel={onCancelZone}
+        />
+      )}
 
       {/* Wind Layer */}
       {windData && <WindLayer windData={windData} showArrows />}
