@@ -187,8 +187,9 @@ class VesselModel:
 
         # Calculate time and fuel
         time_hours = distance_nm / speed_kts
-        fuel_kg = brake_power_kw * sfoc * time_hours
-        fuel_mt = fuel_kg / 1000.0
+        # SFOC is in g/kWh, so result is in grams
+        fuel_grams = brake_power_kw * sfoc * time_hours
+        fuel_mt = fuel_grams / 1_000_000.0  # grams to metric tons
 
         return {
             "fuel_mt": fuel_mt,
