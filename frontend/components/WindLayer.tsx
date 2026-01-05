@@ -1,8 +1,6 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { useMap } from 'react-leaflet';
-import L from 'leaflet';
 import { WindFieldData } from '@/lib/api';
 
 interface WindLayerProps {
@@ -12,30 +10,35 @@ interface WindLayerProps {
   showArrows?: boolean;
 }
 
-interface Particle {
-  x: number;
-  y: number;
-  age: number;
-  maxAge: number;
-}
-
 /**
  * Wind visualization layer using canvas overlay.
- * Renders animated wind particles (like Windy) over the map.
+ * Renders wind arrows over the map.
  */
-export default function WindLayer({
-  windData,
-  opacity = 0.8,
-  particleCount = 3000,
-  showArrows = false,
-}: WindLayerProps) {
-  const map = useMap();
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const particlesRef = useRef<Particle[]>([]);
-  const animationRef = useRef<number | null>(null);
+export default function WindLayer(props: WindLayerProps) {
+  const [isMounted, setIsMounted] = useState(false);
 
   useEffect(() => {
-    if (!windData) return;
+    setIsMounted(true);
+  }, []);
+
+  if (!isMounted) {
+    return null;
+  }
+
+  return <WindLayerInner {...props} />;
+}
+
+function WindLayerInner({
+  windData,
+  opacity = 0.8,
+  showArrows = true,
+}: WindLayerProps) {
+  const { useMap } = require('react-leaflet');
+  const map = useMap();
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    if (!windData || !showArrows) return;
 
     // Create canvas overlay
     const canvas = document.createElement('canvas');
@@ -52,138 +55,21 @@ export default function WindLayer({
     }
     canvasRef.current = canvas;
 
-    // Initialize particles
-    particlesRef.current = [];
-    for (let i = 0; i < particleCount; i++) {
-      particlesRef.current.push(createRandomParticle());
-    }
-
-    function createRandomParticle(): Particle {
-      const bounds = map.getBounds();
-      return {
-        x: bounds.getWest() + Math.random() * (bounds.getEast() - bounds.getWest()),
-        y: bounds.getSouth() + Math.random() * (bounds.getNorth() - bounds.getSouth()),
-        age: Math.floor(Math.random() * 100),
-        maxAge: 80 + Math.floor(Math.random() * 40),
-      };
-    }
-
-    function getWindAtPoint(lon: number, lat: number): { u: number; v: number } {
-      if (!windData) return { u: 0, v: 0 };
-
-      // Find grid indices
-      const { lats, lons, u, v } = windData;
-
-      // Bilinear interpolation
-      const lonIdx = (lon - lons[0]) / (lons[1] - lons[0]);
-      const latIdx = (lat - lats[0]) / (lats[1] - lats[0]);
-
-      const i0 = Math.floor(latIdx);
-      const j0 = Math.floor(lonIdx);
-      const i1 = Math.min(i0 + 1, lats.length - 1);
-      const j1 = Math.min(j0 + 1, lons.length - 1);
-
-      if (i0 < 0 || i0 >= lats.length || j0 < 0 || j0 >= lons.length) {
-        return { u: 0, v: 0 };
-      }
-
-      const di = latIdx - i0;
-      const dj = lonIdx - j0;
-
-      // Bilinear interpolation for u and v
-      const u00 = u[i0]?.[j0] ?? 0;
-      const u01 = u[i0]?.[j1] ?? 0;
-      const u10 = u[i1]?.[j0] ?? 0;
-      const u11 = u[i1]?.[j1] ?? 0;
-
-      const v00 = v[i0]?.[j0] ?? 0;
-      const v01 = v[i0]?.[j1] ?? 0;
-      const v10 = v[i1]?.[j0] ?? 0;
-      const v11 = v[i1]?.[j1] ?? 0;
-
-      const uInterp = (1 - di) * ((1 - dj) * u00 + dj * u01) + di * ((1 - dj) * u10 + dj * u11);
-      const vInterp = (1 - di) * ((1 - dj) * v00 + dj * v01) + di * ((1 - dj) * v10 + dj * v11);
-
-      return { u: uInterp, v: vInterp };
-    }
-
     function resizeCanvas() {
       const size = map.getSize();
       canvas.width = size.x;
       canvas.height = size.y;
     }
 
-    function animate() {
-      if (!canvasRef.current || !windData) return;
-
-      const ctx = canvasRef.current.getContext('2d');
-      if (!ctx) return;
-
-      const bounds = map.getBounds();
-      const size = map.getSize();
-
-      // Fade existing trails
-      ctx.fillStyle = 'rgba(0, 20, 40, 0.03)';
-      ctx.fillRect(0, 0, size.x, size.y);
-
-      // Draw particles
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)';
-      ctx.lineWidth = 1;
-
-      particlesRef.current.forEach((particle, idx) => {
-        const wind = getWindAtPoint(particle.x, particle.y);
-        const speed = Math.sqrt(wind.u * wind.u + wind.v * wind.v);
-
-        if (speed > 0.1) {
-          // Convert geo coords to pixel coords
-          const point = map.latLngToContainerPoint([particle.y, particle.x]);
-
-          // Calculate new position (scale factor for visual movement)
-          const scale = 0.0005 * map.getZoom();
-          const newX = particle.x + wind.u * scale;
-          const newY = particle.y + wind.v * scale;
-
-          const newPoint = map.latLngToContainerPoint([newY, newX]);
-
-          // Draw line segment
-          const alpha = Math.min(1, (particle.maxAge - particle.age) / 20);
-          ctx.strokeStyle = `rgba(100, 200, 255, ${alpha * 0.8})`;
-          ctx.beginPath();
-          ctx.moveTo(point.x, point.y);
-          ctx.lineTo(newPoint.x, newPoint.y);
-          ctx.stroke();
-
-          // Update particle position
-          particle.x = newX;
-          particle.y = newY;
-        }
-
-        particle.age++;
-
-        // Reset particle if too old or out of bounds
-        if (
-          particle.age > particle.maxAge ||
-          particle.x < bounds.getWest() ||
-          particle.x > bounds.getEast() ||
-          particle.y < bounds.getSouth() ||
-          particle.y > bounds.getNorth()
-        ) {
-          particlesRef.current[idx] = createRandomParticle();
-        }
-      });
-
-      animationRef.current = requestAnimationFrame(animate);
-    }
-
     function drawArrows() {
-      if (!canvasRef.current || !windData || !showArrows) return;
+      if (!canvasRef.current || !windData) return;
 
       const ctx = canvasRef.current.getContext('2d');
       if (!ctx) return;
 
       const { lats, lons, u, v } = windData;
 
-      // Clear canvas for arrows
+      // Clear canvas
       const size = map.getSize();
       ctx.clearRect(0, 0, size.x, size.y);
 
@@ -192,8 +78,8 @@ export default function WindLayer({
         for (let j = 0; j < lons.length; j += 2) {
           const lat = lats[i];
           const lon = lons[j];
-          const uVal = u[i][j];
-          const vVal = v[i][j];
+          const uVal = u[i]?.[j] ?? 0;
+          const vVal = v[i]?.[j] ?? 0;
 
           const speed = Math.sqrt(uVal * uVal + vVal * vVal);
           if (speed < 0.5) continue;
@@ -206,14 +92,14 @@ export default function WindLayer({
           }
 
           // Draw arrow
-          const angle = Math.atan2(-vVal, uVal);  // Note: v is flipped for screen coords
+          const angle = Math.atan2(-vVal, uVal); // v is flipped for screen coords
           const length = Math.min(20, speed * 2);
 
           ctx.save();
           ctx.translate(point.x, point.y);
           ctx.rotate(angle);
 
-          // Color based on speed
+          // Color based on speed (blue = slow, red = fast)
           const hue = Math.max(0, 200 - speed * 15);
           ctx.strokeStyle = `hsl(${hue}, 80%, 60%)`;
           ctx.fillStyle = `hsl(${hue}, 80%, 60%)`;
@@ -240,25 +126,12 @@ export default function WindLayer({
 
     // Initial setup
     resizeCanvas();
-
-    if (showArrows) {
-      drawArrows();
-    } else {
-      animate();
-    }
+    drawArrows();
 
     // Event handlers
     const handleMoveEnd = () => {
       resizeCanvas();
-      if (showArrows) {
-        drawArrows();
-      } else {
-        // Reset particles on pan/zoom
-        particlesRef.current = [];
-        for (let i = 0; i < particleCount; i++) {
-          particlesRef.current.push(createRandomParticle());
-        }
-      }
+      drawArrows();
     };
 
     map.on('moveend', handleMoveEnd);
@@ -266,16 +139,13 @@ export default function WindLayer({
 
     // Cleanup
     return () => {
-      if (animationRef.current) {
-        cancelAnimationFrame(animationRef.current);
-      }
       if (canvasRef.current && pane) {
         pane.removeChild(canvasRef.current);
       }
       map.off('moveend', handleMoveEnd);
       map.off('zoomend', handleMoveEnd);
     };
-  }, [windData, map, opacity, particleCount, showArrows]);
+  }, [windData, map, opacity, showArrows]);
 
   return null;
 }

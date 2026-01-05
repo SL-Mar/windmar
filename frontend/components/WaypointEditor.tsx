@@ -1,8 +1,6 @@
 'use client';
 
-import { useEffect, useCallback } from 'react';
-import { useMap, useMapEvents, Marker, Polyline, Popup } from 'react-leaflet';
-import L from 'leaflet';
+import { useCallback, useEffect, useState } from 'react';
 import { Position } from '@/lib/api';
 
 interface WaypointEditorProps {
@@ -12,88 +10,90 @@ interface WaypointEditorProps {
   routeColor?: string;
 }
 
-// Custom waypoint icon
-const createWaypointIcon = (index: number, isFirst: boolean, isLast: boolean) => {
-  const color = isFirst ? '#22c55e' : isLast ? '#ef4444' : '#3b82f6';
-  const size = isFirst || isLast ? 14 : 10;
-
-  return L.divIcon({
-    className: 'custom-waypoint-icon',
-    html: `
-      <div style="
-        width: ${size}px;
-        height: ${size}px;
-        background-color: ${color};
-        border: 2px solid white;
-        border-radius: 50%;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.3);
-        cursor: ${isFirst || isLast ? 'default' : 'move'};
-      "></div>
-    `,
-    iconSize: [size, size],
-    iconAnchor: [size / 2, size / 2],
-  });
-};
-
-// Numbered waypoint icon for route display
-const createNumberedIcon = (index: number, total: number) => {
-  const isFirst = index === 0;
-  const isLast = index === total - 1;
-  const color = isFirst ? '#22c55e' : isLast ? '#ef4444' : '#0073e6';
-
-  return L.divIcon({
-    className: 'numbered-waypoint-icon',
-    html: `
-      <div style="
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        width: 24px;
-        height: 24px;
-        background-color: ${color};
-        border: 2px solid white;
-        border-radius: 50%;
-        box-shadow: 0 2px 6px rgba(0,0,0,0.4);
-        color: white;
-        font-size: 11px;
-        font-weight: bold;
-      ">${index + 1}</div>
-    `,
-    iconSize: [24, 24],
-    iconAnchor: [12, 12],
-  });
-};
-
 /**
  * Interactive waypoint editor component.
  * Click on map to add waypoints, drag to move, right-click to delete.
+ *
+ * This component handles SSR by only loading react-leaflet on client side.
  */
-export default function WaypointEditor({
+export default function WaypointEditor(props: WaypointEditorProps) {
+  const [isMounted, setIsMounted] = useState(false);
+
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
+
+  if (!isMounted) {
+    return null;
+  }
+
+  // Render the actual editor only on client side
+  return <WaypointEditorInner {...props} />;
+}
+
+// Inner component that uses react-leaflet
+function WaypointEditorInner({
   waypoints,
   onWaypointsChange,
   isEditing,
   routeColor = '#0073e6',
 }: WaypointEditorProps) {
+  // Dynamic imports for react-leaflet components
+  const { useMap, useMapEvents, Marker, Polyline, Popup } = require('react-leaflet');
+  const L = require('leaflet');
+
   const map = useMap();
 
-  // Handle map clicks to add waypoints
-  useMapEvents({
-    click(e) {
-      if (!isEditing) return;
+  // Create numbered icon
+  const createNumberedIcon = useCallback((index: number, total: number) => {
+    const isFirst = index === 0;
+    const isLast = index === total - 1;
+    const color = isFirst ? '#22c55e' : isLast ? '#ef4444' : '#0073e6';
 
-      const newWaypoint: Position = {
-        lat: e.latlng.lat,
-        lon: e.latlng.lng,
-      };
+    return L.divIcon({
+      className: 'numbered-waypoint-icon',
+      html: `
+        <div style="
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          width: 24px;
+          height: 24px;
+          background-color: ${color};
+          border: 2px solid white;
+          border-radius: 50%;
+          box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+          color: white;
+          font-size: 11px;
+          font-weight: bold;
+        ">${index + 1}</div>
+      `,
+      iconSize: [24, 24],
+      iconAnchor: [12, 12],
+    });
+  }, [L]);
 
-      onWaypointsChange([...waypoints, newWaypoint]);
-    },
-  });
+  // Map click handler component
+  function MapClickHandler() {
+    useMapEvents({
+      click(e: any) {
+        if (!isEditing) return;
+
+        const newWaypoint: Position = {
+          lat: e.latlng.lat,
+          lon: e.latlng.lng,
+        };
+
+        onWaypointsChange([...waypoints, newWaypoint]);
+      },
+    });
+    return null;
+  }
 
   // Handle waypoint drag
   const handleDrag = useCallback(
-    (index: number, e: L.LeafletEvent) => {
-      const marker = e.target as L.Marker;
+    (index: number, e: any) => {
+      const marker = e.target;
       const position = marker.getLatLng();
 
       const newWaypoints = [...waypoints];
@@ -107,7 +107,7 @@ export default function WaypointEditor({
     [waypoints, onWaypointsChange]
   );
 
-  // Handle waypoint deletion (right-click)
+  // Handle waypoint deletion
   const handleDelete = useCallback(
     (index: number) => {
       const newWaypoints = waypoints.filter((_, i) => i !== index);
@@ -121,6 +121,8 @@ export default function WaypointEditor({
 
   return (
     <>
+      <MapClickHandler />
+
       {/* Route polyline */}
       {routePositions.length >= 2 && (
         <Polyline
@@ -141,8 +143,8 @@ export default function WaypointEditor({
           icon={createNumberedIcon(index, waypoints.length)}
           draggable={isEditing && index > 0 && index < waypoints.length - 1}
           eventHandlers={{
-            dragend: (e) => handleDrag(index, e),
-            contextmenu: (e) => {
+            dragend: (e: any) => handleDrag(index, e),
+            contextmenu: (e: any) => {
               e.originalEvent.preventDefault();
               if (isEditing) {
                 handleDelete(index);
