@@ -517,7 +517,8 @@ class RouteOptimizer:
         # Apply safety constraints
         safety_factor = 1.0
         if self.enforce_safety and weather.sig_wave_height_m > 0:
-            wave_period_s = 5.0 + weather.sig_wave_height_m  # Estimate period from height
+            # Use actual wave period from data, fallback to estimate if not available
+            wave_period_s = weather.wave_period_s if weather.wave_period_s > 0 else (5.0 + weather.sig_wave_height_m)
             safety_factor = self.safety_constraints.get_safety_cost_factor(
                 wave_height_m=weather.sig_wave_height_m,
                 wave_period_s=wave_period_s,
@@ -704,7 +705,8 @@ class RouteOptimizer:
             # Safety assessment for this leg
             leg_safety = None
             if weather.sig_wave_height_m > 0:
-                wave_period_s = 5.0 + weather.sig_wave_height_m
+                # Use actual wave period from data, fallback to estimate if not available
+                wave_period_s = weather.wave_period_s if weather.wave_period_s > 0 else (5.0 + weather.sig_wave_height_m)
                 leg_safety = self.safety_constraints.assess_safety(
                     wave_height_m=weather.sig_wave_height_m,
                     wave_period_s=wave_period_s,

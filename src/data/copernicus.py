@@ -40,6 +40,10 @@ class WeatherData:
     u_component: Optional[np.ndarray] = None
     v_component: Optional[np.ndarray] = None
 
+    # For wave data - additional fields
+    wave_period: Optional[np.ndarray] = None  # Peak wave period (s)
+    wave_direction: Optional[np.ndarray] = None  # Mean wave direction (deg)
+
 
 @dataclass
 class PointWeather:
@@ -295,6 +299,22 @@ class CopernicusDataProvider:
             if len(hs.shape) == 3:
                 hs = hs[0]
 
+            # VTPK = Peak wave period (if available)
+            tp = None
+            if 'VTPK' in ds:
+                tp = ds['VTPK'].values
+                if len(tp.shape) == 3:
+                    tp = tp[0]
+                logger.info("Extracted wave period (VTPK) from CMEMS")
+
+            # VMDR = Mean wave direction (if available)
+            wave_dir = None
+            if 'VMDR' in ds:
+                wave_dir = ds['VMDR'].values
+                if len(wave_dir.shape) == 3:
+                    wave_dir = wave_dir[0]
+                logger.info("Extracted wave direction (VMDR) from CMEMS")
+
             return WeatherData(
                 parameter="wave_height",
                 time=start_time,
@@ -302,6 +322,8 @@ class CopernicusDataProvider:
                 lons=lons,
                 values=hs,
                 unit="m",
+                wave_period=tp,
+                wave_direction=wave_dir,
             )
 
         except Exception as e:
@@ -444,6 +466,21 @@ class CopernicusDataProvider:
             result.wave_height_m = float(self._interpolate_scalar(
                 wave_data.lats, wave_data.lons, wave_data.values, lat, lon
             ))
+
+            # Interpolate wave period if available
+            if wave_data.wave_period is not None:
+                result.wave_period_s = float(self._interpolate_scalar(
+                    wave_data.lats, wave_data.lons, wave_data.wave_period, lat, lon
+                ))
+            else:
+                # Fallback: estimate from wave height
+                result.wave_period_s = 5.0 + result.wave_height_m
+
+            # Interpolate wave direction if available
+            if wave_data.wave_direction is not None:
+                result.wave_dir_deg = float(self._interpolate_scalar(
+                    wave_data.lats, wave_data.lons, wave_data.wave_direction, lat, lon
+                ))
 
         # Interpolate currents
         if current_data is not None and current_data.u_component is not None:
