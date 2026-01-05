@@ -1,158 +1,268 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import dynamic from 'next/dynamic';
 import Header from '@/components/Header';
-import Card, { StatCard } from '@/components/Card';
-import FuelChart from '@/components/FuelChart';
+import Card from '@/components/Card';
+import { WaypointList } from '@/components/WaypointEditor';
+import RouteImport, { SampleRTZButton } from '@/components/RouteImport';
+import VoyageResults, { VoyageProfile } from '@/components/VoyageResults';
 import {
   Navigation,
-  TrendingDown,
-  Clock,
-  Fuel,
-  Wind,
-  Waves,
   Ship,
   Play,
   Loader2,
+  Wind,
+  Waves,
+  Settings,
+  Upload,
+  MousePointer,
+  Eye,
+  EyeOff,
+  RefreshCw,
 } from 'lucide-react';
-import { apiClient, RouteResponse } from '@/lib/api';
-import {
-  formatDistance,
-  formatFuel,
-  formatDuration,
-  formatSpeed,
-  formatDate,
-} from '@/lib/utils';
+import { apiClient, Position, WindFieldData, VoyageResponse } from '@/lib/api';
 
-// Dynamic import for map (client-side only)
-const RouteMap = dynamic(() => import('@/components/RouteMap'), {
+// Dynamic imports for map components (client-side only)
+const MapContainer = dynamic(
+  () => import('react-leaflet').then((mod) => mod.MapContainer),
+  { ssr: false }
+);
+const TileLayer = dynamic(
+  () => import('react-leaflet').then((mod) => mod.TileLayer),
+  { ssr: false }
+);
+const WaypointEditor = dynamic(() => import('@/components/WaypointEditor'), {
   ssr: false,
-  loading: () => (
-    <div className="w-full h-full flex items-center justify-center bg-maritime-dark rounded-lg">
-      <Loader2 className="w-8 h-8 animate-spin text-primary-400" />
-    </div>
-  ),
 });
+const WindLayer = dynamic(
+  () => import('@/components/WindLayer'),
+  { ssr: false }
+);
 
-// Predefined routes
-const ROUTES = {
-  ara_med: {
-    name: 'ARA - MED (Rotterdam → Augusta)',
-    start: { latitude: 51.9225, longitude: 4.4792 },
-    end: { latitude: 37.2333, longitude: 15.2167 },
-  },
-  transatlantic: {
-    name: 'Transatlantic (New York → Gibraltar)',
-    start: { latitude: 40.7128, longitude: -74.0060 },
-    end: { latitude: 36.1408, longitude: -5.3536 },
-  },
-  mediterranean: {
-    name: 'Mediterranean (Malta → Alexandria)',
-    start: { latitude: 35.8989, longitude: 14.5146 },
-    end: { latitude: 31.2001, longitude: 29.9187 },
-  },
-};
+// Map bounds for Europe/Mediterranean
+const DEFAULT_CENTER: [number, number] = [45, 10];
+const DEFAULT_ZOOM = 5;
+
+type ViewMode = 'edit' | 'results';
+type WeatherLayer = 'wind' | 'waves' | 'none';
 
 export default function HomePage() {
-  const [selectedRoute, setSelectedRoute] = useState<keyof typeof ROUTES>('ara_med');
+  // Route state
+  const [waypoints, setWaypoints] = useState<Position[]>([]);
+  const [isEditing, setIsEditing] = useState(true);
+  const [routeName, setRouteName] = useState('Custom Route');
+
+  // Voyage parameters
+  const [calmSpeed, setCalmSpeed] = useState(14.5);
   const [isLaden, setIsLaden] = useState(true);
   const [useWeather, setUseWeather] = useState(true);
-  const [loading, setLoading] = useState(false);
-  const [routeResult, setRouteResult] = useState<RouteResponse | null>(null);
 
-  const handleOptimize = async () => {
-    setLoading(true);
+  // Results
+  const [voyageResult, setVoyageResult] = useState<VoyageResponse | null>(null);
+  const [isCalculating, setIsCalculating] = useState(false);
+  const [viewMode, setViewMode] = useState<ViewMode>('edit');
+
+  // Weather visualization
+  const [weatherLayer, setWeatherLayer] = useState<WeatherLayer>('wind');
+  const [windData, setWindData] = useState<WindFieldData | null>(null);
+  const [isLoadingWeather, setIsLoadingWeather] = useState(false);
+
+  // Load weather data
+  const loadWeatherData = useCallback(async () => {
+    setIsLoadingWeather(true);
     try {
-      const route = ROUTES[selectedRoute];
-      const result = await apiClient.optimizeRoute({
-        start: route.start,
-        end: route.end,
+      const data = await apiClient.getWindField({
+        lat_min: 30,
+        lat_max: 60,
+        lon_min: -15,
+        lon_max: 40,
+        resolution: 1.0,
+      });
+      setWindData(data);
+    } catch (error) {
+      console.error('Failed to load weather:', error);
+    } finally {
+      setIsLoadingWeather(false);
+    }
+  }, []);
+
+  // Load weather on mount
+  useEffect(() => {
+    loadWeatherData();
+  }, [loadWeatherData]);
+
+  // Handle RTZ import
+  const handleRouteImport = (importedWaypoints: Position[], name: string) => {
+    setWaypoints(importedWaypoints);
+    setRouteName(name);
+    setVoyageResult(null);
+    setViewMode('edit');
+  };
+
+  // Clear route
+  const handleClearRoute = () => {
+    setWaypoints([]);
+    setRouteName('Custom Route');
+    setVoyageResult(null);
+    setViewMode('edit');
+  };
+
+  // Calculate voyage
+  const handleCalculate = async () => {
+    if (waypoints.length < 2) {
+      alert('Please add at least 2 waypoints');
+      return;
+    }
+
+    setIsCalculating(true);
+    try {
+      const result = await apiClient.calculateVoyage({
+        waypoints,
+        calm_speed_kts: calmSpeed,
         is_laden: isLaden,
         use_weather: useWeather,
-        departure_time: new Date().toISOString(),
       });
-      setRouteResult(result);
+      setVoyageResult(result);
+      setViewMode('results');
+      setIsEditing(false);
     } catch (error) {
-      console.error('Optimization failed:', error);
-      alert('Route optimization failed. Please ensure the backend is running.');
+      console.error('Voyage calculation failed:', error);
+      alert('Voyage calculation failed. Please check the backend is running.');
     } finally {
-      setLoading(false);
+      setIsCalculating(false);
     }
   };
 
-  // Prepare chart data
-  const chartData = routeResult
-    ? [
-        {
-          name: 'Route Fuel',
-          calm_water: routeResult.total_fuel_mt * 0.6,
-          wind: routeResult.total_fuel_mt * 0.25,
-          waves: routeResult.total_fuel_mt * 0.15,
-        },
-      ]
-    : [];
+  // Calculate total distance
+  const totalDistance = waypoints.reduce((sum, wp, i) => {
+    if (i === 0) return 0;
+    const prev = waypoints[i - 1];
+    const R = 3440.065;
+    const lat1 = (prev.lat * Math.PI) / 180;
+    const lat2 = (wp.lat * Math.PI) / 180;
+    const dlat = ((wp.lat - prev.lat) * Math.PI) / 180;
+    const dlon = ((wp.lon - prev.lon) * Math.PI) / 180;
+    const a =
+      Math.sin(dlat / 2) ** 2 +
+      Math.cos(lat1) * Math.cos(lat2) * Math.sin(dlon / 2) ** 2;
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return sum + R * c;
+  }, 0);
 
   return (
     <div className="min-h-screen bg-gradient-maritime">
       <Header />
 
-      <main className="container mx-auto px-4 pt-24 pb-12">
-        {/* Hero Section */}
-        <div className="mb-8">
-          <h2 className="text-4xl font-bold text-white mb-3">
-            Route Optimization
-          </h2>
-          <p className="text-gray-300 text-lg">
-            Fuel-optimal maritime routing powered by real-time weather data
-          </p>
+      <main className="container mx-auto px-4 pt-20 pb-8">
+        {/* Title */}
+        <div className="mb-4">
+          <h1 className="text-3xl font-bold text-white">WINDMAR</h1>
+          <p className="text-gray-400">Maritime Weather Routing System</p>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
           {/* Left Panel - Controls */}
-          <div className="lg:col-span-1 space-y-6">
-            <Card title="Route Selection" icon={<Navigation className="w-5 h-5" />}>
+          <div className="lg:col-span-1 space-y-4">
+            {/* Route Input Card */}
+            <Card title="Route" icon={<Navigation className="w-5 h-5" />}>
+              {/* Mode Tabs */}
+              <div className="flex space-x-2 mb-4">
+                <button
+                  onClick={() => setIsEditing(true)}
+                  className={`flex-1 flex items-center justify-center space-x-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                    isEditing
+                      ? 'bg-primary-500 text-white'
+                      : 'bg-maritime-dark text-gray-400 hover:text-white'
+                  }`}
+                >
+                  <MousePointer className="w-4 h-4" />
+                  <span>Draw</span>
+                </button>
+                <button
+                  onClick={() => setIsEditing(false)}
+                  className={`flex-1 flex items-center justify-center space-x-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                    !isEditing
+                      ? 'bg-primary-500 text-white'
+                      : 'bg-maritime-dark text-gray-400 hover:text-white'
+                  }`}
+                >
+                  <Upload className="w-4 h-4" />
+                  <span>Import</span>
+                </button>
+              </div>
+
+              {/* Import Section */}
+              {!isEditing && (
+                <div className="mb-4">
+                  <RouteImport onImport={handleRouteImport} />
+                  <div className="mt-2 text-center">
+                    <SampleRTZButton />
+                  </div>
+                </div>
+              )}
+
+              {/* Waypoint List */}
+              <WaypointList
+                waypoints={waypoints}
+                onWaypointsChange={setWaypoints}
+                onClear={handleClearRoute}
+                totalDistance={totalDistance}
+              />
+
+              {isEditing && waypoints.length === 0 && (
+                <p className="text-xs text-gray-500 mt-2">
+                  Click on the map to add waypoints
+                </p>
+              )}
+            </Card>
+
+            {/* Voyage Parameters Card */}
+            <Card title="Voyage Parameters" icon={<Ship className="w-5 h-5" />}>
               <div className="space-y-4">
-                {/* Route Selector */}
+                {/* Calm Speed */}
                 <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-2">
-                    Route
+                  <label className="block text-sm text-gray-300 mb-2">
+                    Calm Water Speed
                   </label>
-                  <select
-                    value={selectedRoute}
-                    onChange={(e) => setSelectedRoute(e.target.value as keyof typeof ROUTES)}
-                    className="w-full bg-maritime-dark border border-white/10 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-primary-400 transition-colors"
-                  >
-                    {Object.entries(ROUTES).map(([key, route]) => (
-                      <option key={key} value={key}>
-                        {route.name}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="flex items-center space-x-2">
+                    <input
+                      type="range"
+                      min="8"
+                      max="18"
+                      step="0.5"
+                      value={calmSpeed}
+                      onChange={(e) => setCalmSpeed(parseFloat(e.target.value))}
+                      className="flex-1"
+                    />
+                    <span className="w-16 text-right text-white font-semibold">
+                      {calmSpeed} kts
+                    </span>
+                  </div>
                 </div>
 
                 {/* Loading Condition */}
                 <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-2">
+                  <label className="block text-sm text-gray-300 mb-2">
                     Loading Condition
                   </label>
                   <div className="flex space-x-2">
                     <button
                       onClick={() => setIsLaden(true)}
-                      className={`flex-1 px-4 py-3 rounded-lg font-medium transition-all ${
+                      className={`flex-1 py-2 rounded-lg text-sm font-medium transition-colors ${
                         isLaden
-                          ? 'bg-primary-500 text-white shadow-maritime'
-                          : 'bg-maritime-dark text-gray-400 hover:bg-maritime-light'
+                          ? 'bg-primary-500 text-white'
+                          : 'bg-maritime-dark text-gray-400 hover:text-white'
                       }`}
                     >
                       Laden
                     </button>
                     <button
                       onClick={() => setIsLaden(false)}
-                      className={`flex-1 px-4 py-3 rounded-lg font-medium transition-all ${
+                      className={`flex-1 py-2 rounded-lg text-sm font-medium transition-colors ${
                         !isLaden
-                          ? 'bg-primary-500 text-white shadow-maritime'
-                          : 'bg-maritime-dark text-gray-400 hover:bg-maritime-light'
+                          ? 'bg-primary-500 text-white'
+                          : 'bg-maritime-dark text-gray-400 hover:text-white'
                       }`}
                     >
                       Ballast
@@ -161,154 +271,105 @@ export default function HomePage() {
                 </div>
 
                 {/* Weather Toggle */}
-                <div className="flex items-center justify-between p-4 bg-maritime-dark rounded-lg">
-                  <div className="flex items-center space-x-3">
-                    <Wind className="w-5 h-5 text-primary-400" />
-                    <span className="text-sm font-medium text-white">
-                      Use Weather Data
-                    </span>
+                <div className="flex items-center justify-between p-3 bg-maritime-dark rounded-lg">
+                  <div className="flex items-center space-x-2">
+                    <Wind className="w-4 h-4 text-primary-400" />
+                    <span className="text-sm text-white">Use Weather</span>
                   </div>
                   <button
                     onClick={() => setUseWeather(!useWeather)}
-                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                    className={`relative w-10 h-6 rounded-full transition-colors ${
                       useWeather ? 'bg-primary-500' : 'bg-gray-600'
                     }`}
                   >
                     <span
-                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                        useWeather ? 'translate-x-6' : 'translate-x-1'
+                      className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-transform ${
+                        useWeather ? 'left-5' : 'left-1'
                       }`}
                     />
                   </button>
                 </div>
 
-                {/* Optimize Button */}
+                {/* Calculate Button */}
                 <button
-                  onClick={handleOptimize}
-                  disabled={loading}
-                  className="w-full bg-gradient-ocean hover:opacity-90 text-white font-semibold py-4 px-6 rounded-lg shadow-ocean transition-all flex items-center justify-center space-x-2 disabled:opacity-50"
+                  onClick={handleCalculate}
+                  disabled={isCalculating || waypoints.length < 2}
+                  className="w-full flex items-center justify-center space-x-2 py-3 bg-gradient-to-r from-primary-500 to-ocean-500 text-white font-semibold rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {loading ? (
+                  {isCalculating ? (
                     <>
                       <Loader2 className="w-5 h-5 animate-spin" />
-                      <span>Optimizing...</span>
+                      <span>Calculating...</span>
                     </>
                   ) : (
                     <>
                       <Play className="w-5 h-5" />
-                      <span>Optimize Route</span>
+                      <span>Calculate Voyage</span>
                     </>
                   )}
                 </button>
               </div>
             </Card>
 
-            {/* Results Summary */}
-            {routeResult && (
-              <Card title="Results Summary" icon={<TrendingDown className="w-5 h-5" />}>
-                <div className="space-y-4">
-                  <ResultRow
-                    icon={<Navigation className="w-4 h-4" />}
-                    label="Distance"
-                    value={formatDistance(routeResult.total_distance_nm)}
-                  />
-                  <ResultRow
-                    icon={<Clock className="w-4 h-4" />}
-                    label="Duration"
-                    value={formatDuration(routeResult.total_time_hours)}
-                  />
-                  <ResultRow
-                    icon={<Fuel className="w-4 h-4" />}
-                    label="Total Fuel"
-                    value={formatFuel(routeResult.total_fuel_mt)}
-                  />
-                  <ResultRow
-                    icon={<TrendingDown className="w-4 h-4" />}
-                    label="Fuel/nm"
-                    value={formatFuel(routeResult.fuel_per_nm)}
-                  />
-                  <ResultRow
-                    icon={<Ship className="w-4 h-4" />}
-                    label="Avg Speed"
-                    value={formatSpeed(
-                      routeResult.total_distance_nm / routeResult.total_time_hours
-                    )}
-                  />
-                </div>
-
-                <div className="mt-4 pt-4 border-t border-white/10">
-                  <p className="text-xs text-gray-400 mb-1">Method</p>
-                  <p className="text-sm font-medium text-white">
-                    {routeResult.optimization_method}
-                  </p>
-                </div>
-
-                <div className="mt-3">
-                  <p className="text-xs text-gray-400 mb-1">ETA</p>
-                  <p className="text-sm font-medium text-white">
-                    {formatDate(routeResult.arrival_time)}
-                  </p>
-                </div>
-              </Card>
-            )}
+            {/* Weather Layer Controls */}
+            <Card title="Weather Display" icon={<Wind className="w-5 h-5" />}>
+              <div className="space-y-2">
+                <WeatherLayerButton
+                  icon={<Wind className="w-4 h-4" />}
+                  label="Wind"
+                  active={weatherLayer === 'wind'}
+                  onClick={() => setWeatherLayer(weatherLayer === 'wind' ? 'none' : 'wind')}
+                />
+                <WeatherLayerButton
+                  icon={<Waves className="w-4 h-4" />}
+                  label="Waves"
+                  active={weatherLayer === 'waves'}
+                  onClick={() => setWeatherLayer(weatherLayer === 'waves' ? 'none' : 'waves')}
+                  disabled
+                />
+                <button
+                  onClick={loadWeatherData}
+                  disabled={isLoadingWeather}
+                  className="w-full flex items-center justify-center space-x-2 py-2 text-sm text-gray-400 hover:text-white transition-colors"
+                >
+                  <RefreshCw className={`w-4 h-4 ${isLoadingWeather ? 'animate-spin' : ''}`} />
+                  <span>Refresh Weather</span>
+                </button>
+              </div>
+            </Card>
           </div>
 
           {/* Center - Map */}
-          <div className="lg:col-span-2 space-y-6">
-            <Card className="h-[600px]">
-              {routeResult ? (
-                <RouteMap
-                  waypoints={routeResult.waypoints}
-                  startLabel={ROUTES[selectedRoute].name.split('→')[0].trim()}
-                  endLabel={ROUTES[selectedRoute].name.split('→')[1].trim()}
-                />
-              ) : (
-                <div className="w-full h-full flex flex-col items-center justify-center text-center">
-                  <div className="mb-6">
-                    <Ship className="w-24 h-24 text-primary-400/30 mx-auto mb-4" />
-                  </div>
-                  <h3 className="text-xl font-semibold text-white mb-2">
-                    Ready to Optimize
+          <div className="lg:col-span-2">
+            <Card className="h-[calc(100vh-180px)] min-h-[500px]">
+              <MapComponent
+                waypoints={waypoints}
+                onWaypointsChange={setWaypoints}
+                isEditing={isEditing}
+                windData={weatherLayer === 'wind' ? windData : null}
+              />
+            </Card>
+          </div>
+
+          {/* Right Panel - Results */}
+          <div className="lg:col-span-1">
+            {voyageResult ? (
+              <div className="space-y-4">
+                <VoyageResults voyage={voyageResult} />
+                <VoyageProfile voyage={voyageResult} />
+              </div>
+            ) : (
+              <Card>
+                <div className="text-center py-12">
+                  <Ship className="w-16 h-16 text-gray-600 mx-auto mb-4" />
+                  <h3 className="text-lg font-semibold text-gray-400 mb-2">
+                    No Voyage Calculated
                   </h3>
-                  <p className="text-gray-400 max-w-md">
-                    Select a route and conditions, then click "Optimize Route" to calculate
-                    the fuel-optimal path considering weather and vessel performance.
+                  <p className="text-sm text-gray-500">
+                    Add waypoints and click "Calculate Voyage" to see results with
+                    per-leg SOG, ETA, and weather conditions.
                   </p>
                 </div>
-              )}
-            </Card>
-
-            {/* Stats Cards */}
-            {routeResult && (
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <StatCard
-                  label="Distance"
-                  value={formatDistance(routeResult.total_distance_nm)}
-                  icon={<Navigation className="w-5 h-5" />}
-                />
-                <StatCard
-                  label="Time"
-                  value={formatDuration(routeResult.total_time_hours)}
-                  icon={<Clock className="w-5 h-5" />}
-                />
-                <StatCard
-                  label="Fuel"
-                  value={formatFuel(routeResult.total_fuel_mt)}
-                  icon={<Fuel className="w-5 h-5" />}
-                  trend="down"
-                />
-                <StatCard
-                  label="Efficiency"
-                  value={formatFuel(routeResult.fuel_per_nm)}
-                  icon={<TrendingDown className="w-5 h-5" />}
-                />
-              </div>
-            )}
-
-            {/* Fuel Breakdown Chart */}
-            {routeResult && (
-              <Card title="Fuel Consumption Breakdown" className="h-80">
-                <FuelChart data={chartData} />
               </Card>
             )}
           </div>
@@ -318,22 +379,90 @@ export default function HomePage() {
   );
 }
 
-function ResultRow({
+// Weather layer toggle button
+function WeatherLayerButton({
   icon,
   label,
-  value,
+  active,
+  onClick,
+  disabled,
 }: {
   icon: React.ReactNode;
   label: string;
-  value: string;
+  active: boolean;
+  onClick: () => void;
+  disabled?: boolean;
 }) {
   return (
-    <div className="flex items-center justify-between">
-      <div className="flex items-center space-x-2 text-gray-400">
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className={`w-full flex items-center justify-between px-3 py-2 rounded-lg transition-colors ${
+        active
+          ? 'bg-primary-500/20 border border-primary-500/50 text-primary-400'
+          : 'bg-maritime-dark text-gray-400 hover:text-white'
+      } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+    >
+      <div className="flex items-center space-x-2">
         {icon}
         <span className="text-sm">{label}</span>
       </div>
-      <span className="text-sm font-semibold text-white">{value}</span>
-    </div>
+      {active ? (
+        <Eye className="w-4 h-4" />
+      ) : (
+        <EyeOff className="w-4 h-4" />
+      )}
+    </button>
+  );
+}
+
+// Map component wrapper
+function MapComponent({
+  waypoints,
+  onWaypointsChange,
+  isEditing,
+  windData,
+}: {
+  waypoints: Position[];
+  onWaypointsChange: (wps: Position[]) => void;
+  isEditing: boolean;
+  windData: WindFieldData | null;
+}) {
+  const [isMounted, setIsMounted] = useState(false);
+
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
+
+  if (!isMounted) {
+    return (
+      <div className="w-full h-full flex items-center justify-center bg-maritime-dark rounded-lg">
+        <Loader2 className="w-8 h-8 animate-spin text-primary-400" />
+      </div>
+    );
+  }
+
+  return (
+    <MapContainer
+      center={DEFAULT_CENTER}
+      zoom={DEFAULT_ZOOM}
+      style={{ height: '100%', width: '100%' }}
+      className="rounded-lg"
+    >
+      <TileLayer
+        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+        url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+      />
+
+      {/* Wind Layer */}
+      {windData && <WindLayer windData={windData} showArrows />}
+
+      {/* Waypoint Editor */}
+      <WaypointEditor
+        waypoints={waypoints}
+        onWaypointsChange={onWaypointsChange}
+        isEditing={isEditing}
+      />
+    </MapContainer>
   );
 }

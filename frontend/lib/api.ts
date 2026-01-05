@@ -1,5 +1,5 @@
 /**
- * API client for WINDMAR backend.
+ * API client for WINDMAR backend v2.
  */
 
 import axios from 'axios';
@@ -13,62 +13,154 @@ const api = axios.create({
   },
 });
 
+// ============================================================================
 // Types
+// ============================================================================
+
 export interface Position {
-  latitude: number;
-  longitude: number;
+  lat: number;
+  lon: number;
 }
 
-export interface RouteRequest {
-  start: Position;
-  end: Position;
+export interface WaypointData {
+  id: number;
+  name: string;
+  lat: number;
+  lon: number;
+}
+
+export interface LegData {
+  from: string;
+  to: string;
+  distance_nm: number;
+  bearing_deg: number;
+}
+
+export interface RouteData {
+  name: string;
+  waypoints: WaypointData[];
+  total_distance_nm: number;
+  legs: LegData[];
+}
+
+// Weather types
+export interface WindFieldData {
+  parameter: string;
+  time: string;
+  bbox: {
+    lat_min: number;
+    lat_max: number;
+    lon_min: number;
+    lon_max: number;
+  };
+  resolution: number;
+  nx: number;
+  ny: number;
+  lats: number[];
+  lons: number[];
+  u: number[][];
+  v: number[][];
+}
+
+export interface WaveFieldData {
+  parameter: string;
+  time: string;
+  bbox: {
+    lat_min: number;
+    lat_max: number;
+    lon_min: number;
+    lon_max: number;
+  };
+  resolution: number;
+  nx: number;
+  ny: number;
+  lats: number[];
+  lons: number[];
+  data: number[][];
+  unit: string;
+  colorscale: {
+    min: number;
+    max: number;
+    colors: string[];
+  };
+}
+
+export interface VelocityData {
+  header: {
+    parameterCategory: number;
+    parameterNumber: number;
+    lo1: number;
+    la1: number;
+    lo2: number;
+    la2: number;
+    dx: number;
+    dy: number;
+    nx: number;
+    ny: number;
+    refTime: string;
+  };
+  data: number[];
+}
+
+export interface PointWeather {
+  position: { lat: number; lon: number };
+  time: string;
+  wind: {
+    speed_ms: number;
+    speed_kts: number;
+    dir_deg: number;
+  };
+  waves: {
+    height_m: number;
+    dir_deg: number;
+  };
+}
+
+// Voyage types
+export interface VoyageRequest {
+  waypoints: Position[];
+  calm_speed_kts: number;
+  is_laden: boolean;
   departure_time?: string;
-  is_laden?: boolean;
-  target_speed_kts?: number;
-  use_weather?: boolean;
-  max_wind_speed_ms?: number;
-  max_wave_height_m?: number;
+  use_weather: boolean;
 }
 
-export interface RouteResponse {
-  waypoints: [number, number][];
+export interface LegResult {
+  leg_index: number;
+  from_wp: WaypointData;
+  to_wp: WaypointData;
+  distance_nm: number;
+  bearing_deg: number;
+  wind_speed_kts: number;
+  wind_dir_deg: number;
+  wave_height_m: number;
+  wave_dir_deg: number;
+  calm_speed_kts: number;
+  stw_kts: number;
+  sog_kts: number;
+  speed_loss_pct: number;
+  time_hours: number;
+  departure_time: string;
+  arrival_time: string;
+  fuel_mt: number;
+  power_kw: number;
+}
+
+export interface VoyageResponse {
+  route_name: string;
+  departure_time: string;
+  arrival_time: string;
   total_distance_nm: number;
   total_time_hours: number;
   total_fuel_mt: number;
-  fuel_per_nm: number;
-  departure_time: string;
-  arrival_time: string;
-  optimization_method: string;
-}
-
-export interface FuelCalculationRequest {
-  speed_kts: number;
+  avg_sog_kts: number;
+  avg_stw_kts: number;
+  legs: LegResult[];
+  calm_speed_kts: number;
   is_laden: boolean;
-  distance_nm?: number;
-  wind_speed_ms?: number;
-  wind_dir_deg?: number;
-  sig_wave_height_m?: number;
-  wave_dir_deg?: number;
-  heading_deg?: number;
 }
 
-export interface FuelCalculationResponse {
-  fuel_mt: number;
-  power_kw: number;
-  time_hours: number;
-  fuel_breakdown: {
-    calm_water: number;
-    wind: number;
-    waves: number;
-  };
-  resistance_breakdown_kn: {
-    calm_water: number;
-    wind: number;
-    waves: number;
-    total: number;
-  };
-}
-
+// Vessel types
 export interface VesselSpecs {
   dwt: number;
   loa: number;
@@ -81,14 +173,10 @@ export interface VesselSpecs {
   service_speed_ballast: number;
 }
 
-export interface FuelScenario {
-  name: string;
-  fuel_mt: number;
-  power_kw: number;
-  conditions: string;
-}
+// ============================================================================
+// API Functions
+// ============================================================================
 
-// API functions
 export const apiClient = {
   // Health check
   async healthCheck() {
@@ -96,19 +184,108 @@ export const apiClient = {
     return response.data;
   },
 
-  // Route optimization
-  async optimizeRoute(request: RouteRequest): Promise<RouteResponse> {
-    const response = await api.post<RouteResponse>('/api/routes/optimize', request);
+  // -------------------------------------------------------------------------
+  // Weather API (Layer 1)
+  // -------------------------------------------------------------------------
+
+  async getWindField(params: {
+    lat_min?: number;
+    lat_max?: number;
+    lon_min?: number;
+    lon_max?: number;
+    resolution?: number;
+    time?: string;
+  } = {}): Promise<WindFieldData> {
+    const response = await api.get<WindFieldData>('/api/weather/wind', { params });
     return response.data;
   },
 
-  // Fuel calculation
-  async calculateFuel(request: FuelCalculationRequest): Promise<FuelCalculationResponse> {
-    const response = await api.post<FuelCalculationResponse>('/api/fuel/calculate', request);
+  async getWindVelocity(params: {
+    lat_min?: number;
+    lat_max?: number;
+    lon_min?: number;
+    lon_max?: number;
+    resolution?: number;
+    time?: string;
+  } = {}): Promise<VelocityData[]> {
+    const response = await api.get<VelocityData[]>('/api/weather/wind/velocity', { params });
     return response.data;
   },
 
-  // Vessel specs
+  async getWaveField(params: {
+    lat_min?: number;
+    lat_max?: number;
+    lon_min?: number;
+    lon_max?: number;
+    resolution?: number;
+    time?: string;
+  } = {}): Promise<WaveFieldData> {
+    const response = await api.get<WaveFieldData>('/api/weather/waves', { params });
+    return response.data;
+  },
+
+  async getWeatherAtPoint(lat: number, lon: number, time?: string): Promise<PointWeather> {
+    const params: { lat: number; lon: number; time?: string } = { lat, lon };
+    if (time) params.time = time;
+    const response = await api.get<PointWeather>('/api/weather/point', { params });
+    return response.data;
+  },
+
+  // -------------------------------------------------------------------------
+  // Routes API (Layer 2)
+  // -------------------------------------------------------------------------
+
+  async parseRTZ(file: File): Promise<RouteData> {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await api.post<RouteData>('/api/routes/parse-rtz', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return response.data;
+  },
+
+  async createRouteFromWaypoints(
+    waypoints: Position[],
+    name: string = 'Custom Route'
+  ): Promise<RouteData> {
+    const response = await api.post<RouteData>(
+      `/api/routes/from-waypoints?name=${encodeURIComponent(name)}`,
+      waypoints
+    );
+    return response.data;
+  },
+
+  // -------------------------------------------------------------------------
+  // Voyage API (Layer 3)
+  // -------------------------------------------------------------------------
+
+  async calculateVoyage(request: VoyageRequest): Promise<VoyageResponse> {
+    const response = await api.post<VoyageResponse>('/api/voyage/calculate', request);
+    return response.data;
+  },
+
+  async getWeatherAlongRoute(
+    waypoints: Position[],
+    time?: string
+  ): Promise<{ time: string; waypoints: Array<{
+    waypoint_index: number;
+    position: Position;
+    wind_speed_kts: number;
+    wind_dir_deg: number;
+    wave_height_m: number;
+    wave_dir_deg: number;
+  }> }> {
+    const wpString = waypoints.map(wp => `${wp.lat},${wp.lon}`).join(';');
+    const params: { waypoints: string; time?: string } = { waypoints: wpString };
+    if (time) params.time = time;
+    const response = await api.get('/api/voyage/weather-along-route', { params });
+    return response.data;
+  },
+
+  // -------------------------------------------------------------------------
+  // Vessel API
+  // -------------------------------------------------------------------------
+
   async getVesselSpecs(): Promise<VesselSpecs> {
     const response = await api.get<VesselSpecs>('/api/vessel/specs');
     return response.data;
@@ -116,12 +293,6 @@ export const apiClient = {
 
   async updateVesselSpecs(specs: VesselSpecs): Promise<{ status: string; message: string }> {
     const response = await api.post('/api/vessel/specs', specs);
-    return response.data;
-  },
-
-  // Fuel scenarios
-  async getFuelScenarios(): Promise<{ scenarios: FuelScenario[] }> {
-    const response = await api.get('/api/scenarios');
     return response.data;
   },
 };
