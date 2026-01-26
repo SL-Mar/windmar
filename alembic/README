@@ -1,0 +1,16 @@
+Generic single-database configuration for WINDMAR.
+
+To create a new migration after modifying models:
+    alembic revision --autogenerate -m "description of changes"
+
+To upgrade to latest version:
+    alembic upgrade head
+
+To downgrade one version:
+    alembic downgrade -1
+
+To see current version:
+    alembic current
+
+To see migration history:
+    alembic history
