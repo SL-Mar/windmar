@@ -30,7 +30,7 @@ import {
   Shield,
   PenTool,
 } from 'lucide-react';
-import { apiClient, Position, WindFieldData, VoyageResponse, OptimizationResponse, CreateZoneRequest } from '@/lib/api';
+import { apiClient, Position, WindFieldData, WaveFieldData, VoyageResponse, OptimizationResponse, CreateZoneRequest } from '@/lib/api';
 
 // Dynamic imports for map components (client-side only)
 const MapContainer = dynamic(
@@ -44,8 +44,12 @@ const TileLayer = dynamic(
 const WaypointEditor = dynamic(() => import('@/components/WaypointEditor'), {
   ssr: false,
 });
-const WindLayer = dynamic(
-  () => import('@/components/WindLayer'),
+const WeatherGridLayer = dynamic(
+  () => import('@/components/WeatherGridLayer'),
+  { ssr: false }
+);
+const WeatherLegend = dynamic(
+  () => import('@/components/WeatherLegend'),
   { ssr: false }
 );
 const ZoneLayer = dynamic(
@@ -88,6 +92,7 @@ export default function HomePage() {
   // Weather visualization
   const [weatherLayer, setWeatherLayer] = useState<WeatherLayer>('wind');
   const [windData, setWindData] = useState<WindFieldData | null>(null);
+  const [waveData, setWaveData] = useState<WaveFieldData | null>(null);
   const [isLoadingWeather, setIsLoadingWeather] = useState(false);
 
   // Zone state
@@ -99,14 +104,19 @@ export default function HomePage() {
   const loadWeatherData = useCallback(async () => {
     setIsLoadingWeather(true);
     try {
-      const data = await apiClient.getWindField({
+      const params = {
         lat_min: 30,
         lat_max: 60,
         lon_min: -15,
         lon_max: 40,
         resolution: 1.0,
-      });
-      setWindData(data);
+      };
+      const [wind, waves] = await Promise.all([
+        apiClient.getWindField(params),
+        apiClient.getWaveField(params),
+      ]);
+      setWindData(wind);
+      setWaveData(waves);
     } catch (error) {
       console.error('Failed to load weather:', error);
     } finally {
@@ -244,16 +254,10 @@ export default function HomePage() {
     <div className="min-h-screen bg-gradient-maritime">
       <Header />
 
-      <main className="container mx-auto px-4 pt-20 pb-8">
-        {/* Title */}
-        <div className="mb-4">
-          <h1 className="text-3xl font-bold text-white">WINDMAR</h1>
-          <p className="text-gray-400">Maritime Weather Routing System</p>
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
+      <main className="px-4 pt-20 pb-4 h-screen flex flex-col">
+        <div className="flex-1 grid grid-cols-1 lg:grid-cols-[280px_1fr_300px] gap-3 min-h-0">
           {/* Left Panel - Controls */}
-          <div className="lg:col-span-1 space-y-4">
+          <div className="space-y-3 overflow-y-auto min-h-0">
             {/* Route Input Card */}
             <Card title="Route" icon={<Navigation className="w-5 h-5" />}>
               {/* Mode Tabs */}
@@ -551,7 +555,6 @@ export default function HomePage() {
                   label="Waves"
                   active={weatherLayer === 'waves'}
                   onClick={() => setWeatherLayer(weatherLayer === 'waves' ? 'none' : 'waves')}
-                  disabled
                 />
                 <button
                   onClick={loadWeatherData}
@@ -599,13 +602,15 @@ export default function HomePage() {
           </div>
 
           {/* Center - Map */}
-          <div className="lg:col-span-2">
-            <Card className="h-[calc(100vh-180px)] min-h-[500px]">
+          <div className="min-h-0">
+            <Card className="h-full min-h-[500px]">
               <MapComponent
                 waypoints={waypoints}
                 onWaypointsChange={setWaypoints}
                 isEditing={isEditing}
-                windData={weatherLayer === 'wind' ? windData : null}
+                weatherLayer={weatherLayer}
+                windData={windData}
+                waveData={waveData}
                 showZones={showZones}
                 zoneKey={zoneKey}
                 isDrawingZone={isDrawingZone}
@@ -616,7 +621,7 @@ export default function HomePage() {
           </div>
 
           {/* Right Panel - Results */}
-          <div className="lg:col-span-1">
+          <div className="overflow-y-auto min-h-0">
             {voyageResult ? (
               <div className="space-y-4">
                 <VoyageResults voyage={voyageResult} />
@@ -685,7 +690,9 @@ function MapComponent({
   waypoints,
   onWaypointsChange,
   isEditing,
+  weatherLayer,
   windData,
+  waveData,
   showZones = true,
   zoneKey = 0,
   isDrawingZone = false,
@@ -695,7 +702,9 @@ function MapComponent({
   waypoints: Position[];
   onWaypointsChange: (wps: Position[]) => void;
   isEditing: boolean;
+  weatherLayer: WeatherLayer;
   windData: WindFieldData | null;
+  waveData: WaveFieldData | null;
   showZones?: boolean;
   zoneKey?: number;
   isDrawingZone?: boolean;
@@ -722,6 +731,7 @@ function MapComponent({
       zoom={DEFAULT_ZOOM}
       style={{ height: '100%', width: '100%' }}
       className="rounded-lg"
+      wheelPxPerZoomLevel={120}
     >
       <TileLayer
         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
@@ -740,8 +750,17 @@ function MapComponent({
         />
       )}
 
-      {/* Wind Layer */}
-      {windData && <WindLayer windData={windData} showArrows />}
+      {/* Weather Grid Layer */}
+      {weatherLayer !== 'none' && (windData || waveData) && (
+        <WeatherGridLayer
+          mode={weatherLayer}
+          windData={windData}
+          waveData={waveData}
+        />
+      )}
+
+      {/* Weather Legend */}
+      {weatherLayer !== 'none' && <WeatherLegend mode={weatherLayer} />}
 
       {/* Waypoint Editor */}
       <WaypointEditor

@@ -53,7 +53,7 @@ RUN groupadd --gid 1000 windmar \
 # Set runtime environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONPATH=/app \
+    PYTHONPATH=/app:/app/deps \
     PATH="/app/deps/bin:$PATH" \
     # Application defaults (override via environment)
     API_HOST=0.0.0.0 \

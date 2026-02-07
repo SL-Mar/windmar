@@ -23,6 +23,9 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
+from fastapi.exceptions import RequestValidationError
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 import uvicorn
 
 # Import WINDMAR modules
@@ -39,6 +42,25 @@ from src.routes.rtz_parser import (
     Route, Waypoint, parse_rtz_string, create_route_from_waypoints,
     haversine_distance, calculate_bearing
 )
+from src.data.land_mask import is_ocean
+
+# Vectorized ocean mask using global-land-mask's numpy support
+def _build_ocean_mask(lat_min, lat_max, lon_min, lon_max, step=0.05):
+    """Build high-res ocean mask using vectorized numpy calls (fast)."""
+    mask_lats = np.arange(lat_min, lat_max + step / 2, step)
+    mask_lons = np.arange(lon_min, lon_max + step / 2, step)
+    lon_grid, lat_grid = np.meshgrid(mask_lons, mask_lats)
+    try:
+        from global_land_mask import globe
+        mask = globe.is_ocean(lat_grid, lon_grid)
+        return mask_lats.tolist(), mask_lons.tolist(), mask.tolist()
+    except ImportError:
+        # Fallback to point-by-point (slow)
+        mask = [
+            [is_ocean(round(float(lat), 2), round(float(lon), 2)) for lon in mask_lons]
+            for lat in mask_lats
+        ]
+        return mask_lats.tolist(), mask_lons.tolist(), mask
 from src.data.copernicus import (
     CopernicusDataProvider, SyntheticDataProvider, WeatherData,
     ClimatologyProvider, UnifiedWeatherProvider, WeatherDataSource
@@ -138,6 +160,14 @@ Contact: support@windmar.io
 
 # Create the application
 app = create_app()
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    body = await request.body()
+    logging.error(f"Validation error on {request.method} {request.url.path}: {exc.errors()}")
+    logging.error(f"Request body: {body[:500]}")
+    return JSONResponse(status_code=422, content={"detail": exc.errors()})
 
 
 # ============================================================================
@@ -749,6 +779,9 @@ async def api_get_wind_field(
 
     wind_data = get_wind_field(lat_min, lat_max, lon_min, lon_max, resolution, time)
 
+    # High-resolution ocean mask (0.05° ≈ 5.5km) via vectorized numpy
+    mask_lats, mask_lons, ocean_mask = _build_ocean_mask(lat_min, lat_max, lon_min, lon_max, step=0.05)
+
     return {
         "parameter": "wind",
         "time": time.isoformat(),
@@ -765,6 +798,9 @@ async def api_get_wind_field(
         "lons": wind_data.lons.tolist(),
         "u": wind_data.u_component.tolist() if wind_data.u_component is not None else [],
         "v": wind_data.v_component.tolist() if wind_data.v_component is not None else [],
+        "ocean_mask": ocean_mask,
+        "ocean_mask_lats": mask_lats,
+        "ocean_mask_lons": mask_lons,
         "source": "copernicus" if copernicus_provider._has_cdsapi else "synthetic",
     }
 
@@ -837,6 +873,9 @@ async def api_get_wave_field(
     # Get waves (CMEMS or synthetic)
     wave_data = get_wave_field(lat_min, lat_max, lon_min, lon_max, resolution, wind_data)
 
+    # High-resolution ocean mask (0.05° ≈ 5.5km) via vectorized numpy
+    mask_lats, mask_lons, ocean_mask = _build_ocean_mask(lat_min, lat_max, lon_min, lon_max, step=0.05)
+
     return {
         "parameter": "wave_height",
         "time": time.isoformat(),
@@ -853,6 +892,9 @@ async def api_get_wave_field(
         "lons": wave_data.lons.tolist(),
         "data": wave_data.values.tolist(),
         "unit": "m",
+        "ocean_mask": ocean_mask,
+        "ocean_mask_lats": mask_lats,
+        "ocean_mask_lons": mask_lons,
         "source": "copernicus" if copernicus_provider._has_copernicusmarine else "synthetic",
         "colorscale": {
             "min": 0,

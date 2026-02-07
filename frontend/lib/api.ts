@@ -60,6 +60,9 @@ export interface WindFieldData {
   lons: number[];
   u: number[][];
   v: number[][];
+  ocean_mask?: boolean[][];
+  ocean_mask_lats?: number[];
+  ocean_mask_lons?: number[];
 }
 
 export interface WaveFieldData {
@@ -78,6 +81,9 @@ export interface WaveFieldData {
   lons: number[];
   data: number[][];
   unit: string;
+  ocean_mask?: boolean[][];
+  ocean_mask_lats?: number[];
+  ocean_mask_lons?: number[];
   colorscale: {
     min: number;
     max: number;

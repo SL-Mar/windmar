@@ -7,8 +7,6 @@ import L from 'leaflet';
 import { ZoneType, ZoneInteraction, ZoneCoordinate, CreateZoneRequest } from '@/lib/api';
 import { X, Save, MapPin, Shield, AlertTriangle, Ban, Info } from 'lucide-react';
 
-// Import leaflet-draw CSS
-import 'leaflet-draw/dist/leaflet-draw.css';
 
 interface DrawnZone {
   coordinates: ZoneCoordinate[];
