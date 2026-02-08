@@ -219,7 +219,7 @@ npm run build
 
 ## License
 
-Private - SL Mar
+Apache 2.0 - See [LICENSE](../LICENSE)
 
 ## Support
 

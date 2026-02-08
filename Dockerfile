@@ -44,7 +44,7 @@ LABEL org.opencontainers.image.title="WINDMAR API" \
       org.opencontainers.image.description="Maritime Route Optimization API" \
       org.opencontainers.image.vendor="SL Mar" \
       org.opencontainers.image.version="2.1.0" \
-      org.opencontainers.image.licenses="Commercial"
+      org.opencontainers.image.licenses="Apache-2.0"
 
 # Security: Run as non-root user
 RUN groupadd --gid 1000 windmar \

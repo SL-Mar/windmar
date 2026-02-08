@@ -389,41 +389,9 @@ EOF
 
 echo "  ✓ Issue 7: GFS pipeline"
 
-# Issue 8: License change
-gh issue create \
-  --title "Switch LICENSE from commercial to open source (MIT or Apache 2.0)" \
-  --label "critical,help-wanted" \
-  --body "$(cat <<'EOF'
-## Summary
-
-The current LICENSE file is a commercial proprietary license that prohibits modification, derivative works, and redistribution. This must be replaced before the project can accept community contributions.
-
-## Current state
-
-- \`LICENSE\` — full commercial license for "SL Mar"
-- \`pyproject.toml:7\` — says \`license = "MIT"\` (contradicts LICENSE file)
-- \`api/main.py:110\` — references "Commercial License"
-- \`Dockerfile:47\` — label says \`licenses="Commercial"\`
-- \`README.md:187\` — says "Private - SL Mar"
-
-## What to do
-
-1. Replace \`LICENSE\` with MIT or Apache 2.0 text
-2. Update \`pyproject.toml\` license field to match
-3. Update \`api/main.py\` license references (lines 11, 110-111)
-4. Update \`Dockerfile\` label (line 47)
-5. Update \`README.md\` (lines 187, 191)
-6. Update \`frontend/README.md\` (line 222)
-7. Update \`src/__init__.py\` (line 4)
-
-## Decision needed
-
-**MIT** — simpler, more permissive, widely used
-**Apache 2.0** — includes patent grant, better for enterprise adoption
-
-This is a decision for the project maintainer (@SL-Mar).
-EOF
-)"
+# Issue 8: License — already resolved (Apache 2.0)
+# The LICENSE file and all references have been aligned to Apache 2.0.
+# Skipping issue creation.
 
 echo "  ✓ Issue 8: License change"
 

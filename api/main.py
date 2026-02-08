@@ -8,7 +8,7 @@ Provides REST API endpoints for:
 - Vessel configuration
 
 Version: 2.1.0
-License: Commercial - See LICENSE file
+License: Apache 2.0 - See LICENSE file
 """
 
 import io
@@ -138,8 +138,8 @@ Contact: support@windmar.io
         redoc_url="/api/redoc",
         openapi_url="/api/openapi.json",
         license_info={
-            "name": "Commercial License",
-            "url": "https://windmar.io/license",
+            "name": "Apache 2.0",
+            "url": "https://www.apache.org/licenses/LICENSE-2.0",
         },
         contact={
             "name": "WINDMAR Support",
