@@ -49,7 +49,13 @@ htmlcov/
 
 # Environment (secrets)
 .env
+.env.local
+.env.*.local
 .cdsapirc
+*.key
+*.pem
+*.crt
+*.secret
 
 # OS
 .DS_Store

@@ -21,8 +21,10 @@ A maritime route optimization platform for Medium Range (MR) Product Tankers. Mi
 - RTZ file import/export (IEC 61174 ECDIS standard)
 
 ### Weather Integration
-- Copernicus Marine Service (CMEMS) for real-time wind, wave, and current data
-- Copernicus Climate Data Store (CDS) for ERA5 reanalysis
+- NOAA GFS (0.25°) for near-real-time wind fields via NOMADS GRIB filter
+- 5-day wind forecast timeline (f000–f120, 3-hourly steps) with Windy-style animation
+- Copernicus Marine Service (CMEMS) for wave and ocean current data
+- ERA5 reanalysis as secondary wind fallback (~5-day lag)
 - Climatology fallback for beyond-forecast-horizon voyages
 - Unified provider that blends forecast and climatology with smooth transitions
 - Synthetic data generator for testing and demos
@@ -42,6 +44,8 @@ A maritime route optimization platform for Medium Range (MR) Product Tankers. Mi
 
 ### Web Interface
 - Interactive Leaflet maps with weather overlays and route visualization
+- Wind particle animation layer (leaflet-velocity)
+- Forecast timeline with play/pause, speed control, and 5-day scrubbing
 - Voyage calculation with per-leg fuel, speed, and ETA breakdown
 - Vessel configuration and calibration panels
 - CII compliance tracking and projections
@@ -71,7 +75,7 @@ windmar/
 │   │   ├── vessel_calibration.py  # Noon report calibration (scipy)
 │   │   └── seakeeping.py       # Ship motion safety assessment
 │   ├── data/
-│   │   ├── copernicus.py       # Copernicus CDS/CMEMS providers
+│   │   ├── copernicus.py       # GFS, ERA5, CMEMS providers + forecast prefetch
 │   │   ├── regulatory_zones.py # Zone management and point-in-polygon
 │   │   ├── eca_zones.py        # ECA zone definitions
 │   │   └── land_mask.py        # Ocean/land detection
@@ -90,7 +94,7 @@ windmar/
 │   └── metrics.py              # Performance metrics collection
 ├── frontend/                   # Next.js 15 + TypeScript
 │   ├── app/                    # Pages (route planner, fuel analysis, vessel config, CII, live dashboard)
-│   ├── components/             # React components (maps, charts, editors, weather layers)
+│   ├── components/             # React components (maps, charts, weather layers, forecast timeline)
 │   └── lib/                    # API client, utilities
 ├── tests/
 │   ├── unit/                   # Vessel model, router, validation, ECA zones, Excel parser
@@ -181,9 +185,16 @@ For real weather data, set `COPERNICUS_MOCK_MODE=false` and provide Copernicus C
 
 ### Weather
 - `GET /api/weather/wind` - Wind field grid (U/V components)
-- `GET /api/weather/waves` - Wave height field
-- `GET /api/weather/currents` - Ocean current field
+- `GET /api/weather/wind/velocity` - Wind in leaflet-velocity format (GFS)
+- `GET /api/weather/waves` - Wave height field (CMEMS)
+- `GET /api/weather/currents` - Ocean current field (CMEMS)
+- `GET /api/weather/currents/velocity` - Currents in leaflet-velocity format
 - `GET /api/weather/point` - Weather at specific coordinates
+
+### Forecast
+- `GET /api/weather/forecast/status` - GFS prefetch progress and run info
+- `POST /api/weather/forecast/prefetch` - Trigger 5-day forecast download (f000–f120)
+- `GET /api/weather/forecast/frames` - Bulk download all forecast frames
 
 ### Routes
 - `POST /api/routes/parse-rtz` - Parse RTZ route file
