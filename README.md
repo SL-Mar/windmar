@@ -27,7 +27,19 @@ A maritime route optimization platform for Medium Range (MR) Product Tankers. Mi
 - ERA5 reanalysis as secondary wind fallback (~5-day lag)
 - Climatology fallback for beyond-forecast-horizon voyages
 - Unified provider that blends forecast and climatology with smooth transitions
+- **Pre-ingested weather database** — grids compressed (zlib/float32) in PostgreSQL, served in milliseconds
+- **Redis shared cache** across all API workers (replaces per-worker in-memory dict)
+- 6-hourly background ingestion cycle with DB → live → synthetic fallback chain
 - Synthetic data generator for testing and demos
+
+### Monte Carlo Simulation
+- Parametric Monte Carlo with temporally correlated perturbations
+- Divides voyage into up to 100 time slices (~1 per 1.2 hours)
+- Cholesky decomposition of exponential temporal correlation matrix
+- Log-normal perturbation model: wind σ=0.35, wave σ=0.20 (70% correlated with wind), current σ=0.15
+- P10/P50/P90 confidence intervals for ETA, fuel consumption, and voyage time
+- Pre-fetches multi-timestep wave forecast grids from database (0–120h)
+- 100 simulations complete in <500ms
 
 ### Regulatory Compliance
 - IMO CII (Carbon Intensity Indicator) calculations with annual tightening
@@ -56,7 +68,7 @@ A maritime route optimization platform for Medium Range (MR) Product Tankers. Mi
 ```
 windmar/
 ├── api/                        # FastAPI backend
-│   ├── main.py                 # API endpoints (weather, routes, voyage, zones, vessel, calibration)
+│   ├── main.py                 # API endpoints, weather ingestion loop, DB provider chain
 │   ├── auth.py                 # JWT / API key authentication
 │   ├── config.py               # API configuration (pydantic-settings)
 │   ├── middleware.py            # Security headers, structured logging, metrics
@@ -65,17 +77,21 @@ windmar/
 │   ├── models.py               # Database models
 │   ├── health.py               # Health check logic
 │   ├── state.py                # Thread-safe application state
-│   ├── cache.py                # Weather data caching
+│   ├── cache.py                # Weather data caching (Redis shared cache)
 │   └── resilience.py           # Circuit breakers
 ├── src/
 │   ├── optimization/
 │   │   ├── vessel_model.py     # Holtrop-Mennen fuel consumption model
 │   │   ├── route_optimizer.py  # A* pathfinding with weather costs
-│   │   ├── voyage.py           # Per-leg voyage calculator
+│   │   ├── voyage.py           # Per-leg voyage calculator (LegWeather, VoyageResult)
+│   │   ├── monte_carlo.py      # Temporal MC simulation with Cholesky correlation
+│   │   ├── grid_weather_provider.py  # Bilinear interpolation from pre-fetched grids
 │   │   ├── vessel_calibration.py  # Noon report calibration (scipy)
 │   │   └── seakeeping.py       # Ship motion safety assessment
 │   ├── data/
 │   │   ├── copernicus.py       # GFS, ERA5, CMEMS providers + forecast prefetch
+│   │   ├── db_weather_provider.py  # DB-backed weather (compressed grids from PostgreSQL)
+│   │   ├── weather_ingestion.py    # Scheduled weather grid ingestion service
 │   │   ├── regulatory_zones.py # Zone management and point-in-polygon
 │   │   ├── eca_zones.py        # ECA zone definitions
 │   │   └── land_mask.py        # Ocean/land detection
@@ -101,7 +117,7 @@ windmar/
 │   ├── integration/            # API endpoints, optimization flow
 │   └── test_e2e_*.py           # End-to-end sensor integration
 ├── examples/                   # Demo scripts (simple, ARA-MED, calibration)
-├── docker/                     # init-db.sql (PostgreSQL schema)
+├── docker/                     # init-db.sql, migrations/ (weather tables)
 ├── data/                       # Runtime data (GRIB cache, calibration, climatology)
 ├── docker-compose.yml          # Full stack (API + frontend + PostgreSQL + Redis)
 ├── Dockerfile                  # Multi-stage production build
@@ -214,6 +230,8 @@ Without these credentials, the system falls back to synthetic data automatically
 
 See the [Weather Data Documentation](https://quantcoder-fs.com/windmar/weather-data.html) for full technical details on data acquisition, GRIB processing, and the forecast timeline.
 
+See the [Monte Carlo Simulation](https://quantcoder-fs.com/windmar/monte-carlo.html) article for the mathematical framework behind the temporal perturbation model.
+
 ## API Endpoints
 
 ### Weather
@@ -237,8 +255,16 @@ See the [Weather Data Documentation](https://quantcoder-fs.com/windmar/weather-d
 - `POST /api/voyage/calculate` - Full voyage calculation with weather
 - `GET /api/voyage/weather-along-route` - Weather conditions per waypoint
 
+### Monte Carlo
+- `POST /api/voyage/monte-carlo` - Parametric MC simulation (P10/P50/P90)
+
 ### Optimization
 - `POST /api/optimize/route` - A\* weather-optimal route finding
+
+### Weather Ingestion
+- `POST /api/weather/ingest` - Trigger immediate weather ingestion cycle
+- `GET /api/weather/ingest/status` - Latest ingestion run info and grid counts
+- `GET /api/weather/freshness` - Weather data age indicator
 
 ### Vessel
 - `GET /api/vessel/specs` - Current vessel specifications
@@ -279,10 +305,43 @@ The system ships with a default MR Product Tanker configuration:
 | SFOC at MCR | 171 g/kWh |
 | Service Speed (laden / ballast) | 14.5 / 15.0 knots |
 
+## Changelog
+
+### v0.0.5 — Weather Database Architecture
+
+Pre-ingested weather grids in PostgreSQL, eliminating live download latency during route calculations.
+
+- **Weather ingestion service** — background task downloads CMEMS wave/current and GFS wind grids every 6 hours, compresses with zlib (float32), stores in PostgreSQL (`weather_forecast_runs` + `weather_grid_data` tables)
+- **DB weather provider** — `DbWeatherProvider` reads compressed grids, crops to route bounding box, returns `WeatherData` objects compatible with `GridWeatherProvider`
+- **Multi-tier fallback chain** — Redis shared cache → DB pre-ingested → live CMEMS/GFS → synthetic
+- **Redis shared cache** — replaces per-worker in-memory dict, all 4 Uvicorn workers share weather data
+- **Frontend freshness indicator** — shows weather data age (green/yellow/red) in map overlay controls
+- **Performance**: route optimization from ~90-180s → 2-5s; voyage calculation from minutes → sub-second
+
+### v0.0.4 — Frontend Refactor, Monte Carlo, Grid Weather
+
+Component architecture refactor and Monte Carlo simulation engine.
+
+- **Frontend component split** — monolithic `page.tsx` refactored into reusable components (`MapOverlayControls`, `VoyagePanel`, `AnalysisTab`, etc.)
+- **Monte Carlo simulation** — N=100 parametric simulation engine with P10/P50/P90 confidence intervals for ETA, fuel, and voyage time
+- **GridWeatherProvider** — bilinear interpolation from pre-fetched weather grids (microsecond-level lookups vs. per-leg API calls), enabling 1000x faster A\* routing
+- **Analysis tab** — persistent storage of voyage results for comparison across routes
+
+### v0.0.3 — Real Weather Data Integration
+
+Live connectivity to Copernicus and NOAA weather services.
+
+- **CMEMS wave and current data** — Copernicus Marine Service API integration with swell/wind-wave decomposition for accurate seakeeping
+- **GFS 5-day wind forecast timeline** — f000–f120 (3-hourly steps) with Windy-style particle animation on the map
+- **ERA5 wind fallback** — Climate Data Store reanalysis as secondary wind source (~5-day lag)
+- **Data sources documentation** — credential setup guide, provider chain documentation
+- **Weather data page** — dedicated documentation for acquisition, GRIB processing, forecast timeline
+
 ## Branch Strategy
 
 - `main` - Stable release branch
 - `development` - Integration branch for features in progress
+- `feature/*` - Feature branches for experimental work
 
 ## License
 
