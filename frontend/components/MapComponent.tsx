@@ -41,6 +41,10 @@ const ForecastTimeline = dynamic(
   () => import('@/components/ForecastTimeline'),
   { ssr: false }
 );
+const WaveInfoPopup = dynamic(
+  () => import('@/components/WaveInfoPopup'),
+  { ssr: false }
+);
 const MapViewportProvider = dynamic(
   () => import('@/components/MapViewportProvider'),
   { ssr: false }
@@ -165,6 +169,15 @@ export default function MapComponent({
         )}
         {weatherLayer === 'currents' && currentVelocityData && (
           <VelocityParticleLayer data={currentVelocityData} type="currents" />
+        )}
+
+        {/* Wave Info Popup (click-to-inspect polar diagram) */}
+        {weatherLayer === 'waves' && (
+          <WaveInfoPopup
+            active={weatherLayer === 'waves'}
+            waveData={waveData}
+            windData={windData}
+          />
         )}
 
         {/* Weather Legend */}

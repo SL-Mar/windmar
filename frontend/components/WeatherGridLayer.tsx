@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { WindFieldData, WaveFieldData } from '@/lib/api';
 import { debugLog } from '@/lib/debugLog';
+import { bilinearInterpolate, bilinearOcean } from '@/lib/gridInterpolation';
 
 interface WeatherGridLayerProps {
   mode: 'wind' | 'waves';
@@ -71,55 +72,6 @@ function waveColor(height: number): [number, number, number, number] {
   return [128, 0, 0, 200];
 }
 
-// Bilinear interpolation helper
-function bilinearInterpolate(
-  data: number[][],
-  latIdx: number,
-  lonIdx: number,
-  latFrac: number,
-  lonFrac: number,
-  ny: number,
-  nx: number,
-): number {
-  const i0 = Math.min(latIdx, ny - 1);
-  const i1 = Math.min(latIdx + 1, ny - 1);
-  const j0 = Math.min(lonIdx, nx - 1);
-  const j1 = Math.min(lonIdx + 1, nx - 1);
-
-  const v00 = data[i0]?.[j0] ?? 0;
-  const v01 = data[i0]?.[j1] ?? 0;
-  const v10 = data[i1]?.[j0] ?? 0;
-  const v11 = data[i1]?.[j1] ?? 0;
-
-  const top = v00 + lonFrac * (v01 - v00);
-  const bot = v10 + lonFrac * (v11 - v10);
-  return top + latFrac * (bot - top);
-}
-
-// Bilinear interpolation for boolean ocean mask (returns fraction 0-1)
-function bilinearOcean(
-  mask: boolean[][],
-  latIdx: number,
-  lonIdx: number,
-  latFrac: number,
-  lonFrac: number,
-  ny: number,
-  nx: number,
-): number {
-  const i0 = Math.min(latIdx, ny - 1);
-  const i1 = Math.min(latIdx + 1, ny - 1);
-  const j0 = Math.min(lonIdx, nx - 1);
-  const j1 = Math.min(lonIdx + 1, nx - 1);
-
-  const v00 = mask[i0]?.[j0] ? 1 : 0;
-  const v01 = mask[i0]?.[j1] ? 1 : 0;
-  const v10 = mask[i1]?.[j0] ? 1 : 0;
-  const v11 = mask[i1]?.[j1] ? 1 : 0;
-
-  const top = v00 + lonFrac * (v01 - v00);
-  const bot = v10 + lonFrac * (v11 - v10);
-  return top + latFrac * (bot - top);
-}
 
 export default function WeatherGridLayer(props: WeatherGridLayerProps) {
   const [isMounted, setIsMounted] = useState(false);
@@ -366,7 +318,7 @@ function WeatherGridLayerInner({
           ctx.restore();
         }
 
-        // Draw swell & wind-wave direction triangles (Windy-style filled triangles)
+        // Draw swell & wind-wave direction crest marks (Windy-style arcs)
         if (currentShowArrows && currentMode === 'waves') {
           const waveW = currentWaveData as any; // access decomposition fields
           const swellDir = waveW?.swell?.direction as number[][] | undefined;
@@ -376,30 +328,54 @@ function WeatherGridLayerInner({
           const hasSwell = swellDir && swellHt;
           const hasWW = wwDir && wwHt;
 
-          const spacing = 30; // denser grid
+          const spacing = 30;
           ctx.save();
 
-          // Helper: draw a filled triangle at (ax,ay) pointing in propagation direction
-          const drawTriangle = (
-            ax: number, ay: number, dirDeg: number, size: number,
-            fillColor: string, strokeColor: string,
+          // Helper: draw wave crest arcs perpendicular to propagation direction
+          const drawWaveCrest = (
+            cx: number, cy: number, dirDeg: number, height: number,
+            color: string, alpha: number,
           ) => {
-            // Met "from" → propagation: +180°. Then to canvas angle.
+            // Met "from" → propagation direction (+180°)
             const propRad = ((dirDeg + 180) * Math.PI) / 180;
-            const angle = propRad - Math.PI / 2;
-            ctx.translate(ax, ay);
-            ctx.rotate(angle);
-            ctx.fillStyle = fillColor;
-            ctx.strokeStyle = strokeColor;
-            ctx.lineWidth = 0.8;
-            ctx.beginPath();
-            ctx.moveTo(size, 0);                    // tip
-            ctx.lineTo(-size * 0.55, -size * 0.45); // left
-            ctx.lineTo(-size * 0.55, size * 0.45);  // right
-            ctx.closePath();
-            ctx.fill();
-            ctx.stroke();
-            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            // Perpendicular to propagation (crest line)
+            const perpRad = propRad + Math.PI / 2;
+            // Arc length proportional to wave height
+            const arcLen = Math.min(12, 4 + height * 3);
+            // Curvature amount (how much the arc bows toward propagation)
+            const curve = Math.min(4, 1.5 + height * 0.8);
+            // Offset between parallel crests along propagation direction
+            const crestGap = 3.5;
+
+            ctx.lineCap = 'round';
+
+            // Draw 3 parallel crest arcs
+            for (let k = -1; k <= 1; k++) {
+              const ox = cx + Math.cos(propRad) * k * crestGap;
+              const oy = cy + Math.sin(propRad) * k * crestGap;
+              // Scale: center arc is largest, outer arcs are smaller
+              const scale = k === 0 ? 1.0 : 0.7;
+              const halfLen = arcLen * scale * 0.5;
+
+              // Start and end of arc along perpendicular direction
+              const x0 = ox - Math.cos(perpRad) * halfLen;
+              const y0 = oy - Math.sin(perpRad) * halfLen;
+              const x1 = ox + Math.cos(perpRad) * halfLen;
+              const y1 = oy + Math.sin(perpRad) * halfLen;
+
+              // Control point bowed in propagation direction
+              const cpx = ox + Math.cos(propRad) * curve * scale;
+              const cpy = oy + Math.sin(propRad) * curve * scale;
+
+              ctx.strokeStyle = color;
+              ctx.globalAlpha = alpha * (k === 0 ? 1.0 : 0.6);
+              ctx.lineWidth = k === 0 ? 1.5 : 1.0;
+              ctx.beginPath();
+              ctx.moveTo(x0, y0);
+              ctx.quadraticCurveTo(cpx, cpy, x1, y1);
+              ctx.stroke();
+            }
+            ctx.globalAlpha = 1.0;
           };
 
           for (let ay = spacing / 2; ay < 256; ay += spacing) {
@@ -427,23 +403,23 @@ function WeatherGridLayerInner({
                 if (mLatIdx < 0 || mLatIdx >= maskNy || mLonIdx < 0 || mLonIdx >= maskNx || !oceanMask[mLatIdx]?.[mLonIdx]) continue;
               }
 
-              // Primary swell: white filled triangle, size ∝ height
+              // Primary swell: white crest arcs, size ∝ height
               if (hasSwell) {
                 const sh = bilinearInterpolate(swellHt, aLatIdx, aLonIdx, aLatFrac, aLonFrac, ny, nx);
                 if (sh > 0.2) {
                   const sd = bilinearInterpolate(swellDir, aLatIdx, aLonIdx, aLatFrac, aLonFrac, ny, nx);
-                  const size = Math.min(9, 4 + sh * 2);
-                  drawTriangle(ax, ay, sd, size, 'rgba(255,255,255,0.85)', 'rgba(180,180,180,0.6)');
+                  const alpha = Math.min(0.95, 0.5 + sh * 0.15);
+                  drawWaveCrest(ax, ay, sd, sh, 'rgba(255,255,255,1)', alpha);
                 }
               }
 
-              // Wind-wave: cyan filled triangle (smaller, offset slightly)
+              // Wind-wave: lighter/smaller crest arcs, offset slightly
               if (hasWW) {
                 const wh = bilinearInterpolate(wwHt, aLatIdx, aLonIdx, aLatFrac, aLonFrac, ny, nx);
                 if (wh > 0.2) {
                   const wd = bilinearInterpolate(wwDir, aLatIdx, aLonIdx, aLatFrac, aLonFrac, ny, nx);
-                  const size = Math.min(7, 3 + wh * 1.5);
-                  drawTriangle(ax + 6, ay + 6, wd, size, 'rgba(0,210,230,0.8)', 'rgba(0,160,180,0.5)');
+                  const alpha = Math.min(0.8, 0.4 + wh * 0.12);
+                  drawWaveCrest(ax + 6, ay + 6, wd, wh * 0.8, 'rgba(200,230,255,1)', alpha);
                 }
               }
 
@@ -452,8 +428,8 @@ function WeatherGridLayerInner({
                 const h = bilinearInterpolate(waveValues, aLatIdx, aLonIdx, aLatFrac, aLonFrac, ny, nx);
                 if (h > 0.3) {
                   const d = bilinearInterpolate(waveDir, aLatIdx, aLonIdx, aLatFrac, aLonFrac, ny, nx);
-                  const size = Math.min(8, 4 + h * 2);
-                  drawTriangle(ax, ay, d, size, 'rgba(255,255,255,0.8)', 'rgba(180,180,180,0.5)');
+                  const alpha = Math.min(0.9, 0.5 + h * 0.15);
+                  drawWaveCrest(ax, ay, d, h, 'rgba(255,255,255,1)', alpha);
                 }
               }
             }

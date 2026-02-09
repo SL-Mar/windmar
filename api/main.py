@@ -1487,6 +1487,147 @@ def _wave_cache_put(cache_key: str, data: dict):
     tmp.rename(p)  # atomic on same filesystem
 
 
+def _rebuild_wave_cache_from_db(cache_key, lat_min, lat_max, lon_min, lon_max):
+    """Rebuild wave forecast file cache from PostgreSQL data."""
+    if db_weather is None:
+        return None
+
+    run_time, hours = db_weather.get_available_hours_by_source("cmems_wave")
+    if not hours:
+        return None
+
+    logger.info(f"Rebuilding wave cache from DB: {len(hours)} hours")
+
+    params = ["wave_hs", "wave_dir", "swell_hs", "swell_tp", "swell_dir",
+              "windwave_hs", "windwave_tp", "windwave_dir"]
+    grids = db_weather.get_grids_for_timeline(
+        "cmems_wave", params, lat_min, lat_max, lon_min, lon_max, hours
+    )
+
+    if not grids or "wave_hs" not in grids or not grids["wave_hs"]:
+        return None
+
+    first_fh = min(grids["wave_hs"].keys())
+    lats_full, lons_full, _ = grids["wave_hs"][first_fh]
+    STEP = 4
+    shared_lats = lats_full[::STEP].tolist()
+    shared_lons = lons_full[::STEP].tolist()
+
+    def _sub(arr):
+        if arr is None:
+            return None
+        return np.round(arr[::STEP, ::STEP], 2).tolist()
+
+    mask_lats_arr, mask_lons_arr, ocean_mask_arr = _build_ocean_mask(
+        lat_min, lat_max, lon_min, lon_max
+    )
+
+    frames = {}
+    for fh in sorted(hours):
+        frame = {}
+        if "wave_hs" in grids and fh in grids["wave_hs"]:
+            _, _, d = grids["wave_hs"][fh]
+            frame["data"] = _sub(d)
+        if "wave_dir" in grids and fh in grids["wave_dir"]:
+            _, _, d = grids["wave_dir"][fh]
+            frame["direction"] = _sub(d)
+
+        has_decomp = (fh in grids.get("windwave_hs", {}) and
+                      fh in grids.get("swell_hs", {}))
+        if has_decomp:
+            frame["windwave"] = {}
+            for p, k in [("windwave_hs", "height"), ("windwave_tp", "period"), ("windwave_dir", "direction")]:
+                if fh in grids.get(p, {}):
+                    _, _, d = grids[p][fh]
+                    frame["windwave"][k] = _sub(d)
+            frame["swell"] = {}
+            for p, k in [("swell_hs", "height"), ("swell_tp", "period"), ("swell_dir", "direction")]:
+                if fh in grids.get(p, {}):
+                    _, _, d = grids[p][fh]
+                    frame["swell"][k] = _sub(d)
+
+        if frame:
+            frames[str(fh)] = frame
+
+    cache_data = {
+        "run_time": run_time.isoformat() if run_time else "",
+        "total_hours": 41,
+        "cached_hours": len(frames),
+        "lats": shared_lats,
+        "lons": shared_lons,
+        "ny": len(shared_lats),
+        "nx": len(shared_lons),
+        "ocean_mask": ocean_mask_arr,
+        "ocean_mask_lats": mask_lats_arr,
+        "ocean_mask_lons": mask_lons_arr,
+        "colorscale": {"min": 0, "max": 6, "colors": ["#00ff00", "#ffff00", "#ff8800", "#ff0000", "#800000"]},
+        "frames": frames,
+    }
+
+    _wave_cache_put(cache_key, cache_data)
+    logger.info(f"Wave cache rebuilt from DB: {len(frames)} frames")
+    return cache_data
+
+
+def _rebuild_current_cache_from_db(cache_key, lat_min, lat_max, lon_min, lon_max):
+    """Rebuild current forecast file cache from PostgreSQL data."""
+    if db_weather is None:
+        return None
+
+    run_time, hours = db_weather.get_available_hours_by_source("cmems_current")
+    if not hours:
+        return None
+
+    logger.info(f"Rebuilding current cache from DB: {len(hours)} hours")
+
+    grids = db_weather.get_grids_for_timeline(
+        "cmems_current", ["current_u", "current_v"],
+        lat_min, lat_max, lon_min, lon_max, hours
+    )
+
+    if not grids or "current_u" not in grids or not grids["current_u"]:
+        return None
+
+    first_fh = min(grids["current_u"].keys())
+    lats_full, lons_full, _ = grids["current_u"][first_fh]
+    STEP = 4
+    sub_lats = lats_full[::STEP]  # numpy, S→N order
+    sub_lons = lons_full[::STEP]
+
+    frames = {}
+    for fh in sorted(hours):
+        u_sub = v_sub = None
+        if fh in grids.get("current_u", {}):
+            _, _, d = grids["current_u"][fh]
+            u_sub = d[::STEP, ::STEP]
+        if fh in grids.get("current_v", {}):
+            _, _, d = grids["current_v"][fh]
+            v_sub = d[::STEP, ::STEP]
+        if u_sub is not None and v_sub is not None:
+            # Ocean mask: zero out land points
+            u_m, v_m = _apply_ocean_mask_velocity(u_sub, v_sub, sub_lats, sub_lons)
+            # Flip N→S for leaflet-velocity (lats stay S→N for header)
+            frames[str(fh)] = {
+                "u": np.round(u_m[::-1], 2).tolist(),
+                "v": np.round(v_m[::-1], 2).tolist(),
+            }
+
+    cache_data = {
+        "run_time": run_time.isoformat() if run_time else "",
+        "total_hours": 41,
+        "cached_hours": len(frames),
+        "lats": sub_lats.tolist(),
+        "lons": sub_lons.tolist(),
+        "ny": len(sub_lats),
+        "nx": len(sub_lons),
+        "frames": frames,
+    }
+
+    _current_cache_put(cache_key, cache_data)
+    logger.info(f"Current cache rebuilt from DB: {len(frames)} frames")
+    return cache_data
+
+
 @app.get("/api/weather/forecast/wave/status")
 async def api_get_wave_forecast_status(
     lat_min: float = Query(30.0),
@@ -1512,6 +1653,28 @@ async def api_get_wave_forecast_status(
             "prefetch_running": prefetch_running,
             "hours": [],
         }
+
+    # Fallback: check PostgreSQL for previously ingested data
+    if db_weather is not None:
+        db_run_time, db_hours = db_weather.get_available_hours_by_source("cmems_wave")
+        if db_hours:
+            rt = ""
+            rh = "00"
+            if db_run_time:
+                try:
+                    rt = db_run_time.strftime("%Y%m%d")
+                    rh = db_run_time.strftime("%H")
+                except Exception:
+                    pass
+            return {
+                "run_date": rt,
+                "run_hour": rh,
+                "total_hours": total_hours,
+                "cached_hours": len(db_hours),
+                "complete": len(db_hours) >= total_hours,
+                "prefetch_running": prefetch_running,
+                "hours": [],
+            }
 
     return {
         "run_date": "",
@@ -1561,6 +1724,21 @@ async def api_trigger_wave_forecast_prefetch(
                 r.setex(_REDIS_PREFETCH_STATUS, 1200, "1")
 
             _wave_prefetch_running = True
+
+            # Skip CMEMS download if file cache already populated (e.g. rebuilt from DB)
+            cache_key_chk = f"wave_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
+            existing = _wave_cache_get(cache_key_chk)
+            if existing and len(existing.get("frames", {})) >= 41:
+                logger.info("Wave forecast file cache already complete, skipping CMEMS download")
+                return
+
+            # Also try to rebuild from DB before downloading from CMEMS
+            if not existing and db_weather is not None:
+                rebuilt = _rebuild_wave_cache_from_db(cache_key_chk, lat_min, lat_max, lon_min, lon_max)
+                if rebuilt and len(rebuilt.get("frames", {})) >= 41:
+                    logger.info("Wave forecast rebuilt from DB, skipping CMEMS download")
+                    return
+
             logger.info("CMEMS wave forecast prefetch started")
 
             result = copernicus_provider.fetch_wave_forecast(lat_min, lat_max, lon_min, lon_max)
@@ -1662,6 +1840,12 @@ async def api_get_wave_forecast_frames(
     cache_key = f"wave_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
     cached = _wave_cache_get(cache_key)
 
+    # Fallback: rebuild from PostgreSQL
+    if not cached:
+        cached = await asyncio.to_thread(
+            _rebuild_wave_cache_from_db, cache_key, lat_min, lat_max, lon_min, lon_max
+        )
+
     if not cached:
         return {
             "run_time": "",
@@ -1750,6 +1934,17 @@ async def api_get_current_forecast_status(
             "prefetch_running": prefetch_running,
         }
 
+    # Fallback: check PostgreSQL for previously ingested data
+    if db_weather is not None:
+        _, db_hours = db_weather.get_available_hours_by_source("cmems_current")
+        if db_hours:
+            return {
+                "total_hours": total_hours,
+                "cached_hours": len(db_hours),
+                "complete": len(db_hours) >= total_hours,
+                "prefetch_running": prefetch_running,
+            }
+
     return {
         "total_hours": total_hours,
         "cached_hours": 0,
@@ -1793,6 +1988,21 @@ async def api_trigger_current_forecast_prefetch(
                 r.setex(_REDIS_CURRENT_PREFETCH_STATUS, 1200, "1")
 
             _current_prefetch_running = True
+
+            # Skip CMEMS download if file cache already populated (e.g. rebuilt from DB)
+            cache_key_chk = f"current_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
+            existing = _current_cache_get(cache_key_chk)
+            if existing and len(existing.get("frames", {})) >= 41:
+                logger.info("Current forecast file cache already complete, skipping CMEMS download")
+                return
+
+            # Also try to rebuild from DB before downloading from CMEMS
+            if not existing and db_weather is not None:
+                rebuilt = _rebuild_current_cache_from_db(cache_key_chk, lat_min, lat_max, lon_min, lon_max)
+                if rebuilt and len(rebuilt.get("frames", {})) >= 41:
+                    logger.info("Current forecast rebuilt from DB, skipping CMEMS download")
+                    return
+
             logger.info("CMEMS current forecast prefetch started")
 
             result = copernicus_provider.fetch_current_forecast(lat_min, lat_max, lon_min, lon_max)
@@ -1802,36 +2012,33 @@ async def api_trigger_current_forecast_prefetch(
 
             first_wd = next(iter(result.values()))
             STEP = 4
-            shared_lats = first_wd.lats[::STEP].tolist()
-            shared_lons = first_wd.lons[::STEP].tolist()
+            sub_lats = first_wd.lats[::STEP]  # numpy, S→N
+            sub_lons = first_wd.lons[::STEP]
 
             import numpy as np
 
-            def _subsample_round(arr):
-                if arr is None:
-                    return None
-                sub = arr[::STEP, ::STEP]
-                return np.round(sub, 2).tolist()
-
             frames = {}
             for fh, wd in sorted(result.items()):
-                frame = {}
-                if wd.u_component is not None:
-                    frame["u"] = _subsample_round(wd.u_component)
-                if wd.v_component is not None:
-                    frame["v"] = _subsample_round(wd.v_component)
-                if frame:
-                    frames[str(fh)] = frame
+                if wd.u_component is not None and wd.v_component is not None:
+                    u_sub = wd.u_component[::STEP, ::STEP]
+                    v_sub = wd.v_component[::STEP, ::STEP]
+                    # Ocean mask: zero out land points
+                    u_m, v_m = _apply_ocean_mask_velocity(u_sub, v_sub, sub_lats, sub_lons)
+                    # Flip N→S for leaflet-velocity (lats stay S→N for header)
+                    frames[str(fh)] = {
+                        "u": np.round(u_m[::-1], 2).tolist(),
+                        "v": np.round(v_m[::-1], 2).tolist(),
+                    }
 
             cache_key = f"current_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
             _current_cache_put(cache_key, {
                 "run_time": first_wd.time.isoformat() if first_wd.time else "",
                 "total_hours": 41,
                 "cached_hours": len(frames),
-                "lats": shared_lats,
-                "lons": shared_lons,
-                "ny": len(shared_lats),
-                "nx": len(shared_lons),
+                "lats": sub_lats.tolist(),
+                "lons": sub_lons.tolist(),
+                "ny": len(sub_lats),
+                "nx": len(sub_lons),
                 "frames": frames,
             })
             logger.info(f"Current forecast cached: {len(frames)} frames")
@@ -1869,6 +2076,12 @@ async def api_get_current_forecast_frames(
     """Return all cached CMEMS current forecast frames."""
     cache_key = f"current_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
     cached = _current_cache_get(cache_key)
+
+    # Fallback: rebuild from PostgreSQL
+    if not cached:
+        cached = await asyncio.to_thread(
+            _rebuild_current_cache_from_db, cache_key, lat_min, lat_max, lon_min, lon_max
+        )
 
     if not cached:
         return {

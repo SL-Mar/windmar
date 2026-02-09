@@ -71,6 +71,8 @@ function VelocityParticleLayerInner({ data, type }: VelocityParticleLayerProps) 
   const L = require('leaflet');
   const map = useMap();
   const layerRef = useRef<any>(null);
+  const prevZoomRef = useRef<number>(map.getZoom());
+  const prevTypeRef = useRef<string>(type);
   const [zoom, setZoom] = useState<number>(map.getZoom());
 
   // Track zoom changes
@@ -80,17 +82,41 @@ function VelocityParticleLayerInner({ data, type }: VelocityParticleLayerProps) 
     return () => { map.off('zoomend', onZoom); };
   }, [map]);
 
-  // Create / recreate velocity layer when data or zoom changes
+  // Create layer once, update data smoothly via setData()
   useEffect(() => {
-    if (!data || data.length < 2) return;
+    if (!data || data.length < 2) {
+      if (layerRef.current) {
+        map.removeLayer(layerRef.current);
+        layerRef.current = null;
+      }
+      return;
+    }
 
-    // Import leaflet-velocity (side-effect: adds L.velocityLayer)
     require('leaflet-velocity/dist/leaflet-velocity.css');
     require('leaflet-velocity');
-
     if (!L.velocityLayer) return;
 
     const isWind = type === 'wind';
+
+    // Only recreate layer on zoom or type change; smooth-update for data-only changes
+    const needsRecreate = !layerRef.current ||
+      prevZoomRef.current !== zoom ||
+      prevTypeRef.current !== type;
+
+    prevZoomRef.current = zoom;
+    prevTypeRef.current = type;
+
+    if (!needsRecreate && layerRef.current) {
+      // Smooth transition: just swap the vector field, particles adapt
+      layerRef.current.setData(data);
+      return;
+    }
+
+    // Full (re)creation — destroy old layer first
+    if (layerRef.current) {
+      map.removeLayer(layerRef.current);
+      layerRef.current = null;
+    }
 
     const layer = L.velocityLayer({
       displayValues: true,
@@ -108,7 +134,7 @@ function VelocityParticleLayerInner({ data, type }: VelocityParticleLayerProps) 
       maxVelocity: isWind ? 15 : 1.5,
       velocityScale: isWind ? 0.01 : 0.05,
       colorScale: isWind ? WIND_COLOR_SCALE : CURRENT_COLOR_SCALE,
-      lineWidth: isWind ? 1.5 : 1.5,
+      lineWidth: 1.5,
       particleAge: isWind ? 90 : 60,
       particleMultiplier: getParticleMultiplier(zoom, isWind),
       frameRate: 20,
