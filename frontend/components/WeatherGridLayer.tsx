@@ -1,13 +1,14 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { WindFieldData, WaveFieldData } from '@/lib/api';
+import { WindFieldData, WaveFieldData, CurrentFieldData } from '@/lib/api';
 import { debugLog } from '@/lib/debugLog';
 
 interface WeatherGridLayerProps {
-  mode: 'wind' | 'waves';
+  mode: 'wind' | 'waves' | 'currents';
   windData?: WindFieldData | null;
   waveData?: WaveFieldData | null;
+  currentData?: CurrentFieldData | null;
   opacity?: number;
   showArrows?: boolean;
 }
@@ -69,6 +70,36 @@ function waveColor(height: number): [number, number, number, number] {
     }
   }
   return [128, 0, 0, 200];
+}
+
+// Current color scale: m/s → RGBA
+function currentColor(speed: number): [number, number, number, number] {
+  // 0→blue, 0.3→cyan, 0.6→teal, 1.0→yellow-green, 1.5→orange, 2.0+→dark orange
+  const stops: [number, number, number, number][] = [
+    [0,    36, 104, 180],
+    [0.3,  24, 176, 200],
+    [0.6, 100, 200, 160],
+    [1.0, 210, 220, 100],
+    [1.5, 250, 180,  60],
+    [2.0, 250, 140,  40],
+  ];
+
+  if (speed <= stops[0][0]) return [stops[0][1], stops[0][2], stops[0][3], 170];
+  if (speed >= stops[stops.length - 1][0])
+    return [stops[stops.length - 1][1], stops[stops.length - 1][2], stops[stops.length - 1][3], 190];
+
+  for (let i = 0; i < stops.length - 1; i++) {
+    if (speed >= stops[i][0] && speed < stops[i + 1][0]) {
+      const t = (speed - stops[i][0]) / (stops[i + 1][0] - stops[i][0]);
+      return [
+        Math.round(stops[i][1] + t * (stops[i + 1][1] - stops[i][1])),
+        Math.round(stops[i][2] + t * (stops[i + 1][2] - stops[i][2])),
+        Math.round(stops[i][3] + t * (stops[i + 1][3] - stops[i][3])),
+        170,
+      ];
+    }
+  }
+  return [250, 140, 40, 190];
 }
 
 // Bilinear interpolation helper
@@ -137,6 +168,7 @@ function WeatherGridLayerInner({
   mode,
   windData,
   waveData,
+  currentData,
   opacity = 0.7,
   showArrows = true,
 }: WeatherGridLayerProps) {
@@ -149,8 +181,10 @@ function WeatherGridLayerInner({
   // without triggering a full layer destroy/recreate cycle.
   const windDataRef = useRef(windData);
   const waveDataRef = useRef(waveData);
+  const currentDataRef = useRef(currentData);
   useEffect(() => { windDataRef.current = windData; }, [windData]);
   useEffect(() => { waveDataRef.current = waveData; }, [waveData]);
+  useEffect(() => { currentDataRef.current = currentData; }, [currentData]);
 
   // Create the GridLayer ONCE per mode/map/opacity — NOT per data change.
   // The createTile closure reads data from refs, so it always gets current values.
@@ -168,7 +202,8 @@ function WeatherGridLayerInner({
         // Read latest data from refs
         const currentWindData = windDataRef.current;
         const currentWaveData = waveDataRef.current;
-        const data = currentMode === 'wind' ? currentWindData : currentWaveData;
+        const currentCurrentData = currentDataRef.current;
+        const data = currentMode === 'wind' ? currentWindData : currentMode === 'currents' ? currentCurrentData : currentWaveData;
         if (!data) return tile;
 
         const ctx = tile.getContext('2d');
@@ -192,8 +227,9 @@ function WeatherGridLayerInner({
 
         // Determine data arrays
         const isWind = currentMode === 'wind' && currentWindData;
-        const uData = isWind ? (currentWindData as WindFieldData).u : null;
-        const vData = isWind ? (currentWindData as WindFieldData).v : null;
+        const isCurrent = currentMode === 'currents' && currentCurrentData;
+        const uData = isWind ? (currentWindData as WindFieldData).u : isCurrent ? (currentCurrentData as CurrentFieldData).u : null;
+        const vData = isWind ? (currentWindData as WindFieldData).v : isCurrent ? (currentCurrentData as CurrentFieldData).v : null;
         const waveValues = currentMode === 'waves' && currentWaveData ? (currentWaveData as WaveFieldData).data : null;
         const waveDir = currentMode === 'waves' && currentWaveData ? (currentWaveData as WaveFieldData).direction : null;
 
@@ -273,7 +309,7 @@ function WeatherGridLayerInner({
               const u = bilinearInterpolate(uData, latIdx, lonIdx, latFrac, lonFrac, ny, nx);
               const v = bilinearInterpolate(vData, latIdx, lonIdx, latFrac, lonFrac, ny, nx);
               const speed = Math.sqrt(u * u + v * v);
-              color = windColor(speed);
+              color = currentMode === 'currents' ? currentColor(speed) : windColor(speed);
             } else if (waveValues) {
               const h = bilinearInterpolate(waveValues, latIdx, lonIdx, latFrac, lonFrac, ny, nx);
               color = waveColor(h);
@@ -302,8 +338,8 @@ function WeatherGridLayerInner({
         ctx.imageSmoothingQuality = 'high';
         ctx.drawImage(offscreen, 0, 0, DS, DS, 0, 0, 256, 256);
 
-        // Draw wind arrows on top (sparse, every ~40px)
-        if (currentShowArrows && currentMode === 'wind' && uData && vData) {
+        // Draw arrows on top (sparse, every ~40px) — wind and currents
+        if (currentShowArrows && (currentMode === 'wind' || currentMode === 'currents') && uData && vData) {
           const arrowSpacing = 40;
           ctx.save();
           for (let ay = arrowSpacing / 2; ay < 256; ay += arrowSpacing) {
@@ -336,10 +372,13 @@ function WeatherGridLayerInner({
               const u = bilinearInterpolate(uData, aLatIdx, aLonIdx, aLatFrac, aLonFrac, ny, nx);
               const v = bilinearInterpolate(vData, aLatIdx, aLonIdx, aLatFrac, aLonFrac, ny, nx);
               const speed = Math.sqrt(u * u + v * v);
-              if (speed < 1) continue;
+              const minSpeed = currentMode === 'currents' ? 0.05 : 1;
+              if (speed < minSpeed) continue;
 
               const angle = Math.atan2(-v, u); // screen Y is inverted
-              const len = Math.min(16, 4 + speed * 0.8);
+              const len = currentMode === 'currents'
+                ? Math.min(14, 5 + speed * 8) // currents: scale up since speeds are ~0-2 m/s
+                : Math.min(16, 4 + speed * 0.8);
 
               ctx.translate(ax, ay);
               ctx.rotate(angle);
@@ -489,16 +528,17 @@ function WeatherGridLayerInner({
   useEffect(() => {
     if (layerRef.current) {
       redrawCountRef.current++;
-      const data = mode === 'wind' ? windData : waveData;
       const sample = mode === 'waves' && waveData?.data
         ? waveData.data[Math.floor(waveData.data.length / 2)]?.[0]?.toFixed(2) ?? '?'
         : mode === 'wind' && windData?.u
           ? windData.u[Math.floor(windData.u.length / 2)]?.[0]?.toFixed(2) ?? '?'
-          : '?';
+          : mode === 'currents' && currentData?.u
+            ? currentData.u[Math.floor(currentData.u.length / 2)]?.[0]?.toFixed(2) ?? '?'
+            : '?';
       debugLog('debug', 'RENDER', `GridLayer redraw #${redrawCountRef.current}: mode=${mode}, sample=${sample}, hasLayer=${!!layerRef.current}`);
       layerRef.current.redraw();
     }
-  }, [windData, waveData, mode]);
+  }, [windData, waveData, currentData, mode]);
 
   return null;
 }
