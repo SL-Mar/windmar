@@ -409,6 +409,15 @@ export default function ForecastTimeline({
   // Wind / Waves / Currents: full scrubber
   const layerLabel = isWindMode ? 'Wind' : isWaveMode ? 'Waves' : 'Currents';
 
+  // Color-code: green when forecast data loaded, gray when not
+  const sourceColor = (() => {
+    if (isWindMode && Object.keys(windFrames).length > 0) return 'text-green-400';
+    if (isWaveMode && waveFrameData) return 'text-green-400';
+    if (isCurrentMode && currentFrameData) return 'text-green-400';
+    return 'text-gray-500';
+  })();
+  const hasData = sourceColor === 'text-green-400';
+
   return (
     <div className="absolute bottom-0 left-0 right-0 z-[1001] bg-maritime-dark/95 backdrop-blur-sm border-t border-white/10">
       {isLoading && (
@@ -461,12 +470,14 @@ export default function ForecastTimeline({
             value={currentHour}
             onChange={handleSliderChange}
             disabled={!prefetchComplete}
-            className="w-full h-2 rounded-full appearance-none cursor-pointer bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed
+            className={`w-full h-2 rounded-full appearance-none cursor-pointer ${hasData ? 'bg-green-900/50' : 'bg-gray-700'} disabled:opacity-40 disabled:cursor-not-allowed
               [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-primary-400
-              [&::-moz-range-thumb]:w-4 [&::-moz-range-thumb]:h-4 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:bg-primary-400 [&::-moz-range-thumb]:border-0"
+              [&::-moz-range-thumb]:w-4 [&::-moz-range-thumb]:h-4 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:bg-primary-400 [&::-moz-range-thumb]:border-0`}
           />
-          <div className="flex justify-between mt-1 text-[10px] text-gray-500">
-            <span>0h</span><span>24h</span><span>48h</span><span>72h</span><span>96h</span><span>120h</span>
+          <div className="flex justify-between mt-1 text-[10px]">
+            {['0h','24h','48h','72h','96h','120h'].map(label => (
+              <span key={label} className={sourceColor}>{label}</span>
+            ))}
           </div>
         </div>
 

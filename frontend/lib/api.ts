@@ -115,6 +115,7 @@ export interface WaveForecastFrames {
   run_time: string;
   total_hours: number;
   cached_hours: number;
+  source?: string;
   lats: number[];
   lons: number[];
   ny: number;
@@ -135,6 +136,7 @@ export interface CurrentForecastFrames {
   run_time: string;
   total_hours: number;
   cached_hours: number;
+  source?: string;
   lats: number[];
   lons: number[];
   ny: number;
@@ -196,6 +198,7 @@ export interface ForecastFrames {
   run_time: string;
   total_hours: number;
   cached_hours: number;
+  source?: string;
   frames: Record<string, VelocityData[]>;
 }
 
