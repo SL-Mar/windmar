@@ -196,8 +196,8 @@ class RouteOptimizer:
         self.weather_provider = weather_provider
 
         # Compute time-value penalty (lambda_time) for cost function.
-        # Every extra hour costs ~50% of the fuel burned at service speed.
-        # This prevents A* from choosing long detours that save marginal fuel.
+        # Every extra hour costs the same fuel as sailing 1 hour at service speed.
+        # This strongly penalises long detours that try to avoid weather.
         service_speed = (
             self.vessel_model.specs.service_speed_laden if is_laden
             else self.vessel_model.specs.service_speed_ballast
@@ -208,7 +208,7 @@ class RouteOptimizer:
             weather=None,
             distance_nm=service_speed,  # 1 hour at service speed
         )
-        self._lambda_time = service_fuel_result['fuel_mt'] * 0.5
+        self._lambda_time = service_fuel_result['fuel_mt'] * 1.0
 
         # Build grid around origin-destination corridor
         grid = self._build_grid(origin, destination)
@@ -770,7 +770,7 @@ class RouteOptimizer:
     def _smooth_path(
         self,
         waypoints: List[Tuple[float, float]],
-        tolerance_nm: float = 5.0,
+        tolerance_nm: float = None,
         check_land: bool = True,
     ) -> List[Tuple[float, float]]:
         """
@@ -778,7 +778,11 @@ class RouteOptimizer:
 
         Removes unnecessary waypoints while keeping path shape.
         Ensures simplified path doesn't cross land.
+
+        Default tolerance is 1 grid cell diagonal (~42nm at 0.5°).
         """
+        if tolerance_nm is None:
+            tolerance_nm = self.resolution_deg * 60 * 1.4  # ~1 cell diagonal
         if len(waypoints) <= 2:
             return waypoints
 

@@ -37,25 +37,45 @@ class WeatherIngestionService:
         return psycopg2.connect(self.db_url)
 
     def ingest_all(self):
-        """Run full ingestion cycle: waves + currents (+ wind if bbox provided).
+        """Run full ingestion cycle: wind + waves + currents.
 
-        Wind is skipped from global pre-ingestion because GFS's GRIB caching
-        is already fast (~2s per fetch). CMEMS wave/current are the real
-        bottleneck (30-60s each) and benefit most from pre-ingestion.
+        Downloads GFS wind (41 forecast hours, ~2-3 min with rate limiting),
+        CMEMS waves, and CMEMS currents into PostgreSQL for sub-second
+        route optimization queries.
         """
         logger.info("Starting weather ingestion cycle")
+        self.ingest_wind()
         self.ingest_waves()
         self.ingest_currents()
         self._supersede_old_runs()
         logger.info("Weather ingestion cycle complete")
 
     def ingest_wind(self):
-        """Fetch GFS wind grids for forecast hours 0-120 (3-hourly)."""
+        """Fetch GFS wind grids for forecast hours 0-120 (3-hourly).
+
+        Downloads 41 GRIB files from NOAA NOMADS with 2s rate limiting
+        between requests. Cached GRIBs are reused (no download needed).
+        Skips if a recent multi-timestep run already exists in the DB.
+        """
+        import time as _time
+
         source = "gfs"
+
+        if self._has_multistep_run(source):
+            logger.debug("Skipping wind ingestion — multi-timestep GFS run exists in DB")
+            return
+
         run_time = datetime.now(timezone.utc)
         conn = self._get_conn()
         try:
             cur = conn.cursor()
+
+            # Supersede any existing complete GFS runs
+            cur.execute(
+                """UPDATE weather_forecast_runs SET status = 'superseded'
+                   WHERE source = %s AND status = 'complete'""",
+                (source,),
+            )
 
             # Create forecast run record
             cur.execute(
@@ -63,8 +83,6 @@ class WeatherIngestionService:
                    (source, run_time, status, grid_resolution,
                     lat_min, lat_max, lon_min, lon_max, forecast_hours)
                    VALUES (%s, %s, 'ingesting', %s, %s, %s, %s, %s, %s)
-                   ON CONFLICT (source, run_time) DO UPDATE
-                   SET status = 'ingesting', ingested_at = NOW()
                    RETURNING id""",
                 (source, run_time, self.GRID_RESOLUTION,
                  self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
@@ -74,7 +92,7 @@ class WeatherIngestionService:
             conn.commit()
 
             ingested_hours = []
-            for fh in self.gfs_provider.FORECAST_HOURS:
+            for i, fh in enumerate(self.gfs_provider.FORECAST_HOURS):
                 try:
                     wind_data = self.gfs_provider.fetch_wind_data(
                         self.LAT_MIN, self.LAT_MAX,
@@ -113,7 +131,11 @@ class WeatherIngestionService:
 
                     ingested_hours.append(fh)
                     conn.commit()
-                    logger.debug(f"Ingested GFS wind f{fh:03d}")
+                    logger.debug(f"Ingested GFS wind f{fh:03d} ({i+1}/{len(self.gfs_provider.FORECAST_HOURS)})")
+
+                    # Rate-limit NOMADS requests (2s between downloads)
+                    if i < len(self.gfs_provider.FORECAST_HOURS) - 1:
+                        _time.sleep(2)
 
                 except Exception as e:
                     logger.error(f"Failed to ingest GFS wind f{fh:03d}: {e}")
@@ -126,7 +148,7 @@ class WeatherIngestionService:
                 (status, ingested_hours, run_id),
             )
             conn.commit()
-            logger.info(f"GFS wind ingestion {status}: {len(ingested_hours)} hours")
+            logger.info(f"GFS wind ingestion {status}: {len(ingested_hours)}/{len(self.gfs_provider.FORECAST_HOURS)} hours")
 
         except Exception as e:
             logger.error(f"Wind ingestion failed: {e}")

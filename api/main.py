@@ -708,6 +708,47 @@ def _get_cache_key(data_type: str, lat_min: float, lat_max: float, lon_min: floa
     return f"{data_type}_{lat_min:.1f}_{lat_max:.1f}_{lon_min:.1f}_{lon_max:.1f}"
 
 
+def _supplement_temporal_wind(
+    temporal_wx,
+    lat_min: float, lat_max: float,
+    lon_min: float, lon_max: float,
+    departure: datetime,
+) -> bool:
+    """Inject GFS wind snapshot into a temporal provider that lacks wind grids.
+
+    Fetches a single GFS forecast-hour-0 wind field from NOAA (fast, ~2-5s)
+    and injects wind_u / wind_v into the temporal provider's grids so that
+    wind resistance is included in calculations.
+
+    Returns True if wind was successfully injected.
+    """
+    import time as _time
+    t0 = _time.monotonic()
+    try:
+        wind_data = gfs_provider.fetch_wind_data(
+            lat_min, lat_max, lon_min, lon_max, departure, forecast_hour=0
+        )
+        if wind_data is None or wind_data.u_component is None:
+            logger.warning("GFS wind supplement: fetch returned None — wind resistance unavailable")
+            return False
+
+        # Convert WeatherData to GridDict format: {forecast_hour: (lats_1d, lons_1d, data_2d)}
+        lats = wind_data.lats
+        lons = wind_data.lons
+        temporal_wx.grids["wind_u"] = {0: (lats, lons, wind_data.u_component)}
+        temporal_wx.grids["wind_v"] = {0: (lats, lons, wind_data.v_component)}
+        temporal_wx._sorted_hours["wind_u"] = [0]
+        temporal_wx._sorted_hours["wind_v"] = [0]
+
+        logger.info(
+            f"GFS wind supplement injected: {len(lats)}x{len(lons)} grid in {_time.monotonic()-t0:.1f}s"
+        )
+        return True
+    except Exception as e:
+        logger.warning(f"GFS wind supplement failed: {e}")
+        return False
+
+
 def get_wind_field(
     lat_min: float, lat_max: float,
     lon_min: float, lon_max: float,
@@ -2530,6 +2571,10 @@ async def calculate_voyage(request: VoyageRequest):
                     used_temporal = True
                     params_loaded = list(temporal_wx.grids.keys())
                     has_temporal_wind = any(p in temporal_wx.grids for p in ["wind_u", "wind_v"])
+                    if not has_temporal_wind:
+                        if _supplement_temporal_wind(temporal_wx, lat_min, lat_max, lon_min, lon_max, departure):
+                            has_temporal_wind = True
+                            params_loaded = list(temporal_wx.grids.keys())
                     logger.info(
                         f"Voyage using temporal weather: {len(params_loaded)} params ({params_loaded}), "
                         f"wind={'yes' if has_temporal_wind else 'NO (calm assumed)'}"
@@ -2891,6 +2936,11 @@ async def optimize_route(request: OptimizationRequest):
                     used_temporal = True
                     params_loaded = list(temporal_wx.grids.keys())
                     has_temporal_wind = any(p in temporal_wx.grids for p in ["wind_u", "wind_v"])
+                    if not has_temporal_wind:
+                        bbox = wx_needs.corridor_bbox
+                        if _supplement_temporal_wind(temporal_wx, bbox[0], bbox[1], bbox[2], bbox[3], departure):
+                            has_temporal_wind = True
+                            params_loaded = list(temporal_wx.grids.keys())
                     hours_per_param = {p: sorted(temporal_wx.grids[p].keys()) for p in params_loaded[:3]}
                     logger.info(
                         f"Temporal provider: {len(params_loaded)} params ({params_loaded}), "
