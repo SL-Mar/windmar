@@ -176,6 +176,9 @@ class VoyageCalculator:
                 current_dir_deg=weather.current_dir_deg,
             )
 
+            # Recompute speed loss from SOG to reflect total impact (weather + current)
+            speed_loss_pct = max(0.0, ((calm_speed_kts - sog_kts) / calm_speed_kts) * 100)
+
             # Calculate time for this leg
             if sog_kts > 0:
                 leg_time_hours = leg.distance_nm / sog_kts

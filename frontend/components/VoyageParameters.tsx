@@ -176,16 +176,16 @@ function OptimizationResultPanel({
   onApply: () => void;
 }) {
   return (
-    <div className="mt-3 p-3 bg-green-500/10 border border-green-500/30 rounded-lg">
+    <div className={`mt-3 p-3 ${result.fuel_savings_pct > 0 ? 'bg-green-500/10 border border-green-500/30' : 'bg-amber-500/10 border border-amber-500/30'} rounded-lg`}>
       <div className="flex items-center justify-between mb-2">
-        <span className="text-sm font-medium text-green-400">Route Optimized</span>
-        <TrendingDown className="w-4 h-4 text-green-400" />
+        <span className={`text-sm font-medium ${result.fuel_savings_pct > 0 ? 'text-green-400' : 'text-amber-400'}`}>Route Optimized</span>
+        <TrendingDown className={`w-4 h-4 ${result.fuel_savings_pct > 0 ? 'text-green-400' : 'text-amber-400'}`} />
       </div>
       <div className="text-xs text-gray-300 space-y-1">
         <div className="flex justify-between">
-          <span>Fuel savings:</span>
-          <span className="text-green-400 font-semibold">
-            {result.fuel_savings_pct.toFixed(1)}%
+          <span>{result.fuel_savings_pct > 0 ? 'Fuel savings:' : 'Fuel increase:'}</span>
+          <span className={`${result.fuel_savings_pct > 0 ? 'text-green-400' : 'text-amber-400'} font-semibold`}>
+            {Math.abs(result.fuel_savings_pct).toFixed(1)}%
           </span>
         </div>
         <div className="flex justify-between">

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, Circle, useMap } from 'react-leaflet';
+import CountryLabels from '@/components/CountryLabels';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
@@ -147,11 +148,12 @@ export default function WindyMap({
           style={{ height: '100%', width: '100%' }}
           zoomControl={true}
         >
-          {/* Base map - dark theme */}
+          {/* Base map - dark theme (no labels, country names added via overlay) */}
           <TileLayer
             attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-            url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+            url="https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png"
           />
+          <CountryLabels />
 
           {/* Windy overlay - using iframe approach for real Windy */}
           {showWindy && (

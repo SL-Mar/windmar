@@ -366,7 +366,7 @@ export default function HomePage() {
 
       const savings = result.fuel_savings_pct > 0
         ? `Fuel savings: ${result.fuel_savings_pct.toFixed(1)}%`
-        : 'No savings found (direct route is optimal)';
+        : `Fuel increase: ${Math.abs(result.fuel_savings_pct).toFixed(1)}% (direct route is more efficient)`;
 
       let wxInfo = '';
       if (result.temporal_weather && result.weather_provenance?.length) {
@@ -471,6 +471,15 @@ export default function HomePage() {
     return sum + R * c;
   }, 0);
 
+  // Derive weather model label for map watermark
+  const weatherModelLabel = useMemo(() => {
+    if (weatherLayer === 'none') return undefined;
+    if (weatherLayer === 'wind') return 'NOAA GFS 0.25\u00B0';
+    if (weatherLayer === 'waves') return 'CMEMS WAV 1/12\u00B0';
+    if (weatherLayer === 'currents') return 'CMEMS PHY 1/12\u00B0';
+    return undefined;
+  }, [weatherLayer]);
+
   // Get displayed analysis for route indicator
   const displayedAnalysis = displayedAnalysisId
     ? analyses.find(a => a.id === displayedAnalysisId)
@@ -506,6 +515,7 @@ export default function HomePage() {
             onCurrentForecastHourChange={handleCurrentForecastHourChange}
             onViewportChange={setViewport}
             viewportBounds={viewport?.bounds ?? null}
+            weatherModelLabel={weatherModelLabel}
           >
             <MapOverlayControls
               weatherLayer={weatherLayer}

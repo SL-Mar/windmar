@@ -29,6 +29,10 @@ const VelocityParticleLayer = dynamic(
   () => import('@/components/VelocityParticleLayer'),
   { ssr: false }
 );
+const CountryLabelsLayer = dynamic(
+  () => import('@/components/CountryLabels'),
+  { ssr: false }
+);
 const ZoneLayer = dynamic(
   () => import('@/components/ZoneLayer'),
   { ssr: false }
@@ -82,6 +86,7 @@ export interface MapComponentProps {
   optimizedWaypoints?: Position[];
   onViewportChange?: (viewport: { bounds: { lat_min: number; lat_max: number; lon_min: number; lon_max: number }; zoom: number }) => void;
   viewportBounds?: { lat_min: number; lat_max: number; lon_min: number; lon_max: number } | null;
+  weatherModelLabel?: string;
   children?: React.ReactNode;
 }
 
@@ -108,6 +113,7 @@ export default function MapComponent({
   optimizedWaypoints,
   onViewportChange,
   viewportBounds = null,
+  weatherModelLabel,
   children,
 }: MapComponentProps) {
   const [isMounted, setIsMounted] = useState(false);
@@ -139,8 +145,9 @@ export default function MapComponent({
       >
         <TileLayer
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-          url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+          url="https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png"
         />
+        <CountryLabelsLayer />
 
         {/* Viewport tracker */}
         {onViewportChange && <MapViewportProvider onViewportChange={onViewportChange} />}
@@ -213,6 +220,15 @@ export default function MapComponent({
           />
         )}
       </MapContainer>
+
+      {/* Weather model watermark */}
+      {weatherModelLabel && (
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-[999] pointer-events-none">
+          <span className="text-white/15 text-sm font-medium tracking-wide select-none">
+            {weatherModelLabel}
+          </span>
+        </div>
+      )}
 
       {/* Floating overlay controls */}
       {children}

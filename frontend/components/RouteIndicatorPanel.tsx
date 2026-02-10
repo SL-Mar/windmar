@@ -236,10 +236,14 @@ export default function RouteIndicatorPanel({
         {/* Optimized route comparison */}
         {optimizationResult && (
           <div className="px-3 pb-3">
-            <div className="p-2 bg-green-500/10 border border-green-500/30 rounded-lg mb-2">
+            <div className={`p-2 ${optimizationResult.fuel_savings_pct > 0 ? 'bg-green-500/10 border border-green-500/30' : 'bg-amber-500/10 border border-amber-500/30'} rounded-lg mb-2`}>
               <div className="flex justify-between text-xs mb-2">
-                <span className="text-green-400 font-medium">Route Comparison</span>
-                <span className="text-green-400">{optimizationResult.fuel_savings_pct.toFixed(1)}% fuel savings</span>
+                <span className={`${optimizationResult.fuel_savings_pct > 0 ? 'text-green-400' : 'text-amber-400'} font-medium`}>Route Comparison</span>
+                <span className={optimizationResult.fuel_savings_pct > 0 ? 'text-green-400' : 'text-amber-400'}>
+                  {optimizationResult.fuel_savings_pct > 0
+                    ? `${optimizationResult.fuel_savings_pct.toFixed(1)}% fuel savings`
+                    : `${Math.abs(optimizationResult.fuel_savings_pct).toFixed(1)}% fuel increase`}
+                </span>
               </div>
               <table className="w-full text-xs">
                 <thead>

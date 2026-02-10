@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { MapContainer, TileLayer, Polyline, Marker, Popup, useMap } from 'react-leaflet';
+import CountryLabels from '@/components/CountryLabels';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
@@ -69,8 +70,9 @@ export default function RouteMap({
       >
         <TileLayer
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-          url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+          url="https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png"
         />
+        <CountryLabels />
 
         {/* Route line */}
         <Polyline

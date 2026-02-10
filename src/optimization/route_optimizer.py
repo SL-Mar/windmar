@@ -172,6 +172,7 @@ class RouteOptimizer:
         weather_provider: Callable[[float, float, datetime], LegWeather],
         max_cells: int = DEFAULT_MAX_CELLS,
         avoid_land: bool = True,
+        max_time_factor: float = 1.15,
     ) -> OptimizedRoute:
         """
         Find optimal route from origin to destination.
@@ -239,15 +240,29 @@ class RouteOptimizer:
         # Smooth path to reduce unnecessary waypoints
         waypoints = self._smooth_path(waypoints)
 
+        # Calculate direct route for comparison (constant speed to match voyage calculator)
+        direct_fuel, direct_time, direct_distance, _, _, _ = self._calculate_route_stats(
+            [origin, destination], departure_time, calm_speed_kts, is_laden, use_variable_speed=False
+        )
+
         # Calculate route statistics with variable speed optimization
         opt_fuel, opt_time, opt_distance, leg_details, safety_summary, speed_profile = self._calculate_route_stats(
             waypoints, departure_time, calm_speed_kts, is_laden, use_variable_speed=self.variable_speed
         )
 
-        # Calculate direct route for comparison (with variable speed for fair comparison)
-        direct_fuel, direct_time, direct_distance, _, _, _ = self._calculate_route_stats(
-            [origin, destination], departure_time, calm_speed_kts, is_laden, use_variable_speed=self.variable_speed
-        )
+        # Enforce time budget: if variable speed made the route too slow, recalculate
+        # with per-leg target times so total time stays within max_time_factor of direct
+        max_allowed_time = direct_time * max_time_factor
+        if self.variable_speed and opt_time > max_allowed_time and len(waypoints) > 1:
+            logger.info(
+                f"Variable speed exceeded time budget: {opt_time:.1f}h > {max_allowed_time:.1f}h "
+                f"(direct={direct_time:.1f}h x {max_time_factor}). Recalculating with time constraint."
+            )
+            opt_fuel, opt_time, opt_distance, leg_details, safety_summary, speed_profile = (
+                self._calculate_route_stats_time_constrained(
+                    waypoints, departure_time, calm_speed_kts, is_laden, max_allowed_time
+                )
+            )
 
         optimization_time_ms = (time.time() - start_time) * 1000
 
@@ -255,8 +270,8 @@ class RouteOptimizer:
         fuel_savings = ((direct_fuel - opt_fuel) / direct_fuel * 100) if direct_fuel > 0 else 0
         time_savings = ((direct_time - opt_time) / direct_time * 100) if direct_time > 0 else 0
 
-        # Calculate average speed
-        avg_speed = sum(speed_profile) / len(speed_profile) if speed_profile else calm_speed_kts
+        # Average speed = total distance / total time (SOG-based)
+        avg_speed = opt_distance / opt_time if opt_time > 0 else calm_speed_kts
 
         return OptimizedRoute(
             waypoints=waypoints,
@@ -979,6 +994,137 @@ class RouteOptimizer:
             'max_accel_ms2': max_accel,
         }
 
+        return total_fuel, total_time, total_distance, leg_details, safety_summary, speed_profile
+
+    def _calculate_route_stats_time_constrained(
+        self,
+        waypoints: List[Tuple[float, float]],
+        departure_time: datetime,
+        calm_speed_kts: float,
+        is_laden: bool,
+        max_time_hours: float,
+    ) -> Tuple[float, float, float, List[Dict], Dict, List[float]]:
+        """
+        Calculate route stats with variable speed under a total time budget.
+
+        Distributes the time budget proportionally across legs (by distance),
+        then finds the minimum-fuel speed for each leg that meets its time target.
+        """
+        # First pass: compute leg distances and weather
+        legs_info = []
+        total_distance = 0.0
+        current_time = departure_time
+
+        for i in range(len(waypoints) - 1):
+            from_wp = waypoints[i]
+            to_wp = waypoints[i + 1]
+            distance = self._haversine_distance(from_wp[0], from_wp[1], to_wp[0], to_wp[1])
+            bearing = self._calculate_bearing(from_wp[0], from_wp[1], to_wp[0], to_wp[1])
+
+            mid_lat = (from_wp[0] + to_wp[0]) / 2
+            mid_lon = (from_wp[1] + to_wp[1]) / 2
+            mid_time = current_time + timedelta(hours=distance / calm_speed_kts / 2)
+
+            try:
+                weather = self.weather_provider(mid_lat, mid_lon, mid_time)
+            except Exception:
+                weather = LegWeather()
+
+            legs_info.append({
+                'from_wp': from_wp, 'to_wp': to_wp,
+                'distance': distance, 'bearing': bearing, 'weather': weather,
+            })
+            total_distance += distance
+            current_time += timedelta(hours=distance / calm_speed_kts)
+
+        # Distribute time budget proportionally by distance
+        total_fuel = 0.0
+        total_time = 0.0
+        leg_details = []
+        speed_profile = []
+        max_roll = 0.0
+        max_pitch = 0.0
+        max_accel = 0.0
+        all_warnings = []
+        worst_safety_status = SafetyStatus.SAFE
+        current_time = departure_time
+
+        for info in legs_info:
+            distance = info['distance']
+            bearing = info['bearing']
+            weather = info['weather']
+
+            # Per-leg time target proportional to distance share
+            leg_target_time = max_time_hours * (distance / total_distance) if total_distance > 0 else 1.0
+
+            # Find optimal speed that meets the time target
+            leg_speed, fuel_mt, time_hours = self._find_optimal_speed(
+                distance_nm=distance,
+                weather=weather,
+                bearing_deg=bearing,
+                is_laden=is_laden,
+                target_time_hours=leg_target_time,
+            )
+
+            speed_profile.append(leg_speed)
+
+            # SOG for this leg
+            current_effect = self._calculate_current_effect(
+                leg_speed, bearing, weather.current_speed_ms, weather.current_dir_deg
+            )
+            sog = max(leg_speed + current_effect, 0.1)
+
+            total_fuel += fuel_mt
+            total_time += time_hours
+
+            # Safety assessment
+            leg_safety = None
+            if weather.sig_wave_height_m > 0:
+                wave_period_s = weather.wave_period_s if weather.wave_period_s > 0 else (5.0 + weather.sig_wave_height_m)
+                leg_safety = self.safety_constraints.assess_safety(
+                    wave_height_m=weather.sig_wave_height_m,
+                    wave_period_s=wave_period_s,
+                    wave_dir_deg=weather.wave_dir_deg,
+                    heading_deg=bearing,
+                    speed_kts=leg_speed,
+                    is_laden=is_laden,
+                )
+                max_roll = max(max_roll, leg_safety.motions.roll_amplitude_deg)
+                max_pitch = max(max_pitch, leg_safety.motions.pitch_amplitude_deg)
+                max_accel = max(max_accel, leg_safety.motions.bridge_accel_ms2)
+                if leg_safety.status.value != 'safe':
+                    worst_safety_status = max(worst_safety_status, leg_safety.status, key=lambda s: ['safe', 'marginal', 'dangerous'].index(s.value) if hasattr(s, 'value') else 0)
+                for w in (leg_safety.warnings if leg_safety else []):
+                    if w not in all_warnings:
+                        all_warnings.append(w)
+
+            leg_details.append({
+                'from': info['from_wp'],
+                'to': info['to_wp'],
+                'distance_nm': distance,
+                'bearing_deg': bearing,
+                'fuel_mt': fuel_mt,
+                'time_hours': time_hours,
+                'sog_kts': sog,
+                'stw_kts': leg_speed,
+                'wind_speed_ms': weather.wind_speed_ms,
+                'wave_height_m': weather.sig_wave_height_m,
+                'safety_status': leg_safety.status.value if leg_safety else 'safe',
+                'roll_deg': leg_safety.motions.roll_amplitude_deg if leg_safety else 0.0,
+                'pitch_deg': leg_safety.motions.pitch_amplitude_deg if leg_safety else 0.0,
+            })
+
+            current_time += timedelta(hours=time_hours)
+
+        safety_summary = {
+            'status': worst_safety_status.value if hasattr(worst_safety_status, 'value') else 'safe',
+            'warnings': all_warnings,
+            'max_roll_deg': max_roll,
+            'max_pitch_deg': max_pitch,
+            'max_accel_ms2': max_accel,
+        }
+
+        logger.info(f"Time-constrained recalc: {total_time:.1f}h (budget={max_time_hours:.1f}h), fuel={total_fuel:.1f}mt")
         return total_fuel, total_time, total_distance, leg_details, safety_summary, speed_profile
 
     @staticmethod
