@@ -3,10 +3,10 @@
 Example: Rotterdam to Augusta route optimization.
 
 Demonstrates complete workflow:
-1. Download weather and wave forecasts
-2. Optimize route considering weather
-3. Visualize weather maps and route
-4. Calculate fuel consumption
+1. Initialize vessel model
+2. Optimize route with synthetic weather (no external data needed)
+3. Calculate fuel consumption
+4. Display route statistics
 """
 
 import logging
@@ -17,11 +17,8 @@ from pathlib import Path
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.grib.extractor import GRIBExtractor
-from src.grib.parser import GRIBParser
 from src.optimization.vessel_model import VesselModel, VesselSpecs
 from src.optimization.router import MaritimeRouter, RouteConstraints
-from src.visualization.plotter import WeatherPlotter
 
 
 # Configure logging
@@ -60,56 +57,18 @@ def run_ara_med_optimization():
     logger.info(f"Target Speed: {target_speed} knots")
     logger.info("")
 
-    # Step 1: Download weather and wave forecasts
-    logger.info("Step 1: Downloading weather forecasts...")
-    extractor = GRIBExtractor(cache_dir="data/grib_cache")
-
-    waypoints = [ROTTERDAM, AUGUSTA]
-
-    try:
-        gfs_file, wave_file = extractor.download_route_forecast(
-            waypoints=waypoints,
-            forecast_hours=168,  # 7 days
-            buffer_degrees=2.0,
-        )
-        logger.info(f"✓ Downloaded GFS forecast: {gfs_file.name}")
-        logger.info(f"✓ Downloaded wave forecast: {wave_file.name}")
-    except Exception as e:
-        logger.warning(f"Could not download forecasts: {e}")
-        logger.info("Continuing with great circle route (no weather optimization)")
-        gfs_file = None
-        wave_file = None
-
-    # Step 2: Parse GRIB files
-    grib_parser_gfs = None
-    grib_parser_wave = None
-
-    if gfs_file and gfs_file.exists():
-        try:
-            logger.info("\nStep 2: Parsing GRIB files...")
-            grib_parser_gfs = GRIBParser(gfs_file)
-            forecast_times = grib_parser_gfs.get_forecast_times()
-            logger.info(f"✓ Parsed GFS data: {len(forecast_times)} forecast times")
-
-            if wave_file and wave_file.exists():
-                grib_parser_wave = GRIBParser(wave_file)
-                logger.info(f"✓ Parsed wave data")
-        except ImportError:
-            logger.warning("pygrib not installed - skipping weather optimization")
-            logger.info("Install with: pip install pygrib")
-        except Exception as e:
-            logger.warning(f"Could not parse GRIB files: {e}")
-
-    # Step 3: Initialize vessel model
-    logger.info("\nStep 3: Initializing vessel model...")
+    # Step 1: Initialize vessel model
+    logger.info("Step 1: Initializing vessel model...")
     vessel_specs = VesselSpecs()
     vessel_model = VesselModel(specs=vessel_specs)
-    logger.info(f"✓ MR Product Tanker: {vessel_specs.dwt:.0f} DWT")
+    logger.info(f"  MR Product Tanker: {vessel_specs.dwt:.0f} DWT")
     logger.info(f"  LOA: {vessel_specs.loa}m, Beam: {vessel_specs.beam}m")
     logger.info(f"  Main Engine: {vessel_specs.mcr_kw:.0f} kW")
 
-    # Step 4: Optimize route
-    logger.info("\nStep 4: Optimizing route...")
+    # Step 2: Optimize route
+    logger.info("\nStep 2: Optimizing route...")
+    logger.info("  Using great circle routing (no weather data)")
+    logger.info("  For weather-aware routing, use the web interface with Docker Compose")
     constraints = RouteConstraints(
         max_wind_speed_ms=25.0,
         max_wave_height_m=5.0,
@@ -118,8 +77,8 @@ def run_ara_med_optimization():
 
     router = MaritimeRouter(
         vessel_model=vessel_model,
-        grib_parser_gfs=grib_parser_gfs,
-        grib_parser_wave=grib_parser_wave,
+        grib_parser_gfs=None,
+        grib_parser_wave=None,
         constraints=constraints,
     )
 
@@ -131,7 +90,7 @@ def run_ara_med_optimization():
         target_speed_kts=target_speed,
     )
 
-    # Step 5: Display results
+    # Step 3: Display results
     logger.info("\n" + "=" * 70)
     logger.info("OPTIMIZATION RESULTS")
     logger.info("=" * 70)
@@ -148,45 +107,56 @@ def run_ara_med_optimization():
     # Display waypoints
     logger.info("Route Waypoints:")
     for i, (lat, lon) in enumerate(route_result['waypoints'][:5]):
-        logger.info(f"  {i+1}. {lat:.4f}°N, {lon:.4f}°E")
+        logger.info(f"  {i+1}. {lat:.4f}N, {lon:.4f}E")
     if len(route_result['waypoints']) > 10:
         logger.info(f"  ... ({len(route_result['waypoints']) - 10} more waypoints)")
     for i, (lat, lon) in enumerate(route_result['waypoints'][-5:],
                                     start=len(route_result['waypoints'])-4):
-        logger.info(f"  {i}. {lat:.4f}°N, {lon:.4f}°E")
+        logger.info(f"  {i}. {lat:.4f}N, {lon:.4f}E")
 
-    # Step 6: Visualization (optional)
-    logger.info("\nStep 6: Creating visualizations...")
+    # Step 4: Fuel consumption scenarios
+    logger.info("\n" + "=" * 70)
+    logger.info("FUEL CONSUMPTION SCENARIOS")
+    logger.info("=" * 70)
 
-    try:
-        plotter = WeatherPlotter(use_cartopy=True)
+    # Calm weather
+    logger.info("\nScenario 1: Laden, 14.5 knots, calm weather")
+    calm = vessel_model.calculate_fuel_consumption(
+        speed_kts=14.5, is_laden=True, weather=None, distance_nm=348.0,
+    )
+    logger.info(f"  Fuel:  {calm['fuel_mt']:.2f} MT/day")
+    logger.info(f"  Power: {calm['power_kw']:,.0f} kW ({calm['power_kw']/vessel_specs.mcr_kw*100:.1f}% MCR)")
 
-        # Plot route on map
-        if grib_parser_gfs and len(grib_parser_gfs.get_forecast_times()) > 0:
-            try:
-                forecast_time = grib_parser_gfs.get_forecast_times()[0]
-                lats, lons, u_wind = grib_parser_gfs.get_grid_data("UGRD", forecast_time)
-                _, _, v_wind = grib_parser_gfs.get_grid_data("VGRD", forecast_time)
+    # Head wind
+    logger.info("\nScenario 2: Laden, 14.5 knots, head wind 20 kts")
+    wind = vessel_model.calculate_fuel_consumption(
+        speed_kts=14.5, is_laden=True,
+        weather={"wind_speed_ms": 10.0, "wind_dir_deg": 0, "heading_deg": 0},
+        distance_nm=348.0,
+    )
+    logger.info(f"  Fuel:  {wind['fuel_mt']:.2f} MT/day (+{wind['fuel_mt']-calm['fuel_mt']:.2f} MT)")
+    logger.info(f"  Penalty: {(wind['fuel_mt']/calm['fuel_mt']-1)*100:.1f}%")
 
-                output_dir = Path("data")
-                output_dir.mkdir(exist_ok=True)
-
-                plotter.plot_wind_field(
-                    lats, lons, u_wind, v_wind,
-                    title=f"Rotterdam-Augusta Route with Wind Forecast\n{forecast_time}",
-                    route=route_result['waypoints'],
-                    output_file=output_dir / "ara_med_route_wind.png"
-                )
-                logger.info("✓ Saved wind field plot: data/ara_med_route_wind.png")
-            except Exception as e:
-                logger.warning(f"Could not create wind field plot: {e}")
-
-    except Exception as e:
-        logger.warning(f"Visualization failed: {e}")
+    # Rough seas
+    logger.info("\nScenario 3: Laden, 14.5 knots, head wind 25 kts + 3m waves")
+    rough = vessel_model.calculate_fuel_consumption(
+        speed_kts=14.5, is_laden=True,
+        weather={
+            "wind_speed_ms": 12.5, "wind_dir_deg": 0, "heading_deg": 0,
+            "sig_wave_height_m": 3.0, "wave_dir_deg": 0,
+        },
+        distance_nm=348.0,
+    )
+    logger.info(f"  Fuel:  {rough['fuel_mt']:.2f} MT/day (+{rough['fuel_mt']-calm['fuel_mt']:.2f} MT)")
+    logger.info(f"  Penalty: {(rough['fuel_mt']/calm['fuel_mt']-1)*100:.1f}%")
 
     logger.info("\n" + "=" * 70)
-    logger.info("✓ Example completed successfully!")
+    logger.info("Example completed successfully!")
     logger.info("=" * 70)
+    logger.info("")
+    logger.info("For weather-aware route optimization with real forecasts,")
+    logger.info("use the web interface: docker compose up -d --build")
+    logger.info("Then open http://localhost:3003")
 
     return route_result
 

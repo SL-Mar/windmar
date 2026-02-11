@@ -13,9 +13,6 @@ dependencies = [
     "scipy>=1.10.0",
     "pandas>=2.0.0",
 
-    # GRIB file handling (GFS wind data)
-    "pygrib>=2.1.4",
-
     # Land mask for ocean detection
     "global-land-mask>=1.0.0",
 
