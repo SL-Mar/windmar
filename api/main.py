@@ -2930,6 +2930,15 @@ async def optimize_route(request: OptimizationRequest):
     - 0.5° = ~30nm cells, good balance (default)
     - 1.0° = ~60nm cells, fast, less precise
     """
+    # Run the entire optimization in a thread so the event loop stays
+    # responsive (weather provisioning + VISIR can take 30s+, and an
+    # unresponsive event loop causes the uvicorn worker supervisor to
+    # kill the child process).
+    return await asyncio.to_thread(_optimize_route_sync, request)
+
+
+def _optimize_route_sync(request: "OptimizationRequest") -> "OptimizationResponse":
+    """Synchronous route optimization logic (runs in a thread pool)."""
     global route_optimizer, visir_optimizer
 
     departure = request.departure_time or datetime.utcnow()

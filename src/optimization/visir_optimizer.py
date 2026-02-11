@@ -91,16 +91,17 @@ class VisirOptimizer(BaseOptimizer):
     """
 
     # Defaults
-    DEFAULT_RESOLUTION_DEG = 0.5
-    DEFAULT_TIME_STEP_HOURS = 6.0   # temporal resolution of the graph
-    DEFAULT_MAX_NODES = 30_000
-    SPEED_RANGE_KTS = (6.0, 18.0)
-    SPEED_STEPS = 3                  # candidate speeds per edge
+    DEFAULT_RESOLUTION_DEG = 1.0
+    DEFAULT_TIME_STEP_HOURS = 3.0   # temporal resolution of the graph
+    DEFAULT_MAX_NODES = 100_000
+    SPEED_RANGE_KTS = (10.0, 18.0)  # practical speed range (avoids extreme slow-steaming)
+    SPEED_STEPS = 2                  # candidate speeds per edge (fast convergence)
 
     # 8-connected grid directions (row_delta, col_delta)
+    # Diagonals are checked first to prefer direct-line progress
     DIRECTIONS = [
-        (-1, 0), (-1, 1), (0, 1), (1, 1),
-        (1, 0), (1, -1), (0, -1), (-1, -1),
+        (-1, 1), (1, 1), (-1, -1), (1, -1),
+        (-1, 0), (0, 1), (1, 0), (0, -1),
     ]
 
     def __init__(
@@ -265,7 +266,7 @@ class VisirOptimizer(BaseOptimizer):
         self,
         origin: Tuple[float, float],
         destination: Tuple[float, float],
-        margin_deg: float = 5.0,
+        margin_deg: float = 3.0,
         filter_land: bool = True,
     ) -> Tuple[Dict[Tuple[int, int], Tuple[float, float]], Dict[str, float]]:
         """
@@ -365,7 +366,11 @@ class VisirOptimizer(BaseOptimizer):
         max_nodes: int,
     ) -> Tuple[Optional[List[_GraphNode]], int]:
         """
-        Dijkstra over the (row, col, time_step) graph.
+        A*-guided Dijkstra over the (row, col, time_step) graph.
+
+        Uses an admissible heuristic (minimum fuel to reach destination in
+        calm conditions) to focus exploration toward the goal, dramatically
+        reducing the number of nodes explored on long routes.
 
         At each expansion, for every spatial neighbour we try multiple
         candidate speeds and pick the cheapest safe option.  The time-step
@@ -373,16 +378,40 @@ class VisirOptimizer(BaseOptimizer):
         speed, giving the algorithm its *isochrone* character.
         """
         start_lat, start_lon = grid[start_rc]
+        end_lat, end_lon = grid[end_rc]
         start_node = _GraphNode(
             lat=start_lat, lon=start_lon, time=departure_time,
             row=start_rc[0], col=start_rc[1], time_step=0,
         )
 
+        # Compute admissible heuristic: min fuel per nm in calm conditions
+        # (cheapest possible cost for any remaining distance)
+        min_spd, max_spd = self.SPEED_RANGE_KTS
+        min_cost_per_nm = float("inf")
+        for speed_kts in np.linspace(min_spd, max_spd, self.SPEED_STEPS * 2):
+            res = self.vessel_model.calculate_fuel_consumption(
+                speed_kts=float(speed_kts), is_laden=is_laden,
+                weather=None, distance_nm=100.0,
+            )
+            cost_per_nm = res["fuel_mt"] / 100.0
+            min_cost_per_nm = min(min_cost_per_nm, cost_per_nm)
+
+        # Cache heuristic per spatial cell (haversine to dest × min fuel rate)
+        h_cache: Dict[Tuple[int, int], float] = {}
+
+        def heuristic(rc: Tuple[int, int]) -> float:
+            if rc not in h_cache:
+                lat, lon = grid[rc]
+                dist = self.haversine(lat, lon, end_lat, end_lon)
+                h_cache[rc] = dist * min_cost_per_nm
+            return h_cache[rc]
+
         cost_so_far: Dict[Tuple[int, int, int], float] = {start_node.key(): 0.0}
         parent: Dict[Tuple[int, int, int], Tuple[int, int, int]] = {}
         node_map: Dict[Tuple[int, int, int], _GraphNode] = {start_node.key(): start_node}
 
-        pq: List[_QueueEntry] = [_QueueEntry(cost=0.0, node=start_node)]
+        h0 = heuristic(start_rc)
+        pq: List[_QueueEntry] = [_QueueEntry(cost=h0, node=start_node)]
         explored = 0
 
         # Cache zone penalties per spatial edge (row,col)->(row,col) to avoid
@@ -394,8 +423,10 @@ class VisirOptimizer(BaseOptimizer):
             cur = entry.node
             cur_key = cur.key()
 
-            # Stale entry?
-            if entry.cost > cost_so_far.get(cur_key, float("inf")):
+            # Stale entry? (compare against g-cost, not f-cost)
+            g_cur = cost_so_far.get(cur_key, float("inf"))
+            h_cur = heuristic((cur.row, cur.col))
+            if entry.cost > g_cur + h_cur + 1e-9:
                 continue
 
             explored += 1
@@ -460,12 +491,13 @@ class VisirOptimizer(BaseOptimizer):
                 )
                 nb_key = nb_node.key()
 
-                tentative = cost_so_far[cur_key] + edge_cost
-                if tentative < cost_so_far.get(nb_key, float("inf")):
-                    cost_so_far[nb_key] = tentative
+                tentative_g = cost_so_far[cur_key] + edge_cost
+                if tentative_g < cost_so_far.get(nb_key, float("inf")):
+                    cost_so_far[nb_key] = tentative_g
                     parent[nb_key] = cur_key
                     node_map[nb_key] = nb_node
-                    heapq.heappush(pq, _QueueEntry(cost=tentative, node=nb_node, speed_kts=chosen_speed))
+                    f_score = tentative_g + heuristic(nb_rc)
+                    heapq.heappush(pq, _QueueEntry(cost=f_score, node=nb_node, speed_kts=chosen_speed))
 
         return None, explored
 
