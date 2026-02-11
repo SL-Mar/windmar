@@ -5,7 +5,7 @@ import {
   PenLine, Upload, Navigation, Compass, Loader2, ChevronDown, ChevronUp,
   Trash2, MapPin, Play, Eye, EyeOff,
 } from 'lucide-react';
-import { Position, OptimizationResponse, SpeedScenario, EngineType, DualOptimizationResults, RouteVisibility, ParetoSolution } from '@/lib/api';
+import { Position, OptimizationResponse, OptimizedRouteKey, AllOptimizationResults, RouteVisibility, ROUTE_STYLES, EMPTY_ALL_RESULTS } from '@/lib/api';
 import SavedRoutes from '@/components/SavedRoutes';
 import RouteImport from '@/components/RouteImport';
 
@@ -20,24 +20,21 @@ interface RouteIndicatorPanelProps {
   onCalculate: () => void;
   isOptimizing: boolean;
   onOptimize: () => void;
-  optimizationResults: DualOptimizationResults;
-  paretoResults?: ParetoSolution[];
-  onApplyOptimizedRoute: (engine: EngineType) => void;
+  allResults: AllOptimizationResults;
+  onApplyOptimizedRoute: (key: OptimizedRouteKey) => void;
   onDismissOptimizedRoute: () => void;
   routeVisibility: RouteVisibility;
   onRouteVisibilityChange: (v: RouteVisibility) => void;
   onRouteImport: (waypoints: Position[], name: string) => void;
   onLoadRoute: (waypoints: Position[]) => void;
   onClearRoute: () => void;
-  // Whether a voyage baseline has been calculated (gates Optimize button)
   hasBaseline?: boolean;
-  // Analysis result summary (if displayed)
   analysisFuel?: number;
   analysisTime?: number;
   analysisAvgSpeed?: number;
 }
 
-const WEIGHT_LABELS: Record<number, string> = { 0: 'Fuel', 0.5: 'Balanced', 1: 'Safety' };
+const WEIGHT_LABELS: Record<string, string> = { fuel: 'Fuel', balanced: 'Balanced', safety: 'Safety' };
 
 export default function RouteIndicatorPanel({
   waypoints,
@@ -50,8 +47,7 @@ export default function RouteIndicatorPanel({
   onCalculate,
   isOptimizing,
   onOptimize,
-  optimizationResults,
-  paretoResults = [],
+  allResults,
   onApplyOptimizedRoute,
   onDismissOptimizedRoute,
   onRouteImport,
@@ -66,7 +62,6 @@ export default function RouteIndicatorPanel({
 }: RouteIndicatorPanelProps) {
   const [savedRoutesExpanded, setSavedRoutesExpanded] = useState(false);
   const [showImport, setShowImport] = useState(false);
-  const [selectedStrategy, setSelectedStrategy] = useState<'constant_speed' | 'match_eta'>('match_eta');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Calculate bearing from first to last WP
@@ -76,7 +71,8 @@ export default function RouteIndicatorPanel({
 
   const bearingLabel = bearingToCardinal(bearing);
 
-  const hasPareto = paretoResults.length > 0;
+  // Check if we have any results
+  const hasAnyResults = Object.values(allResults).some(r => r !== null);
 
   // No route state
   if (waypoints.length === 0) {
@@ -137,6 +133,29 @@ export default function RouteIndicatorPanel({
   // Route loaded
   const firstWp = waypoints[0];
   const lastWp = waypoints[waypoints.length - 1];
+
+  // Derive baseline values from any available result
+  const anyResult = Object.values(allResults).find(r => r !== null);
+  const baselineFuel = anyResult?.baseline_fuel_mt ?? anyResult?.direct_fuel_mt ?? 0;
+  const baselineDist = anyResult?.baseline_distance_nm ?? totalDistance;
+  const baselineTime = anyResult?.baseline_time_hours ?? anyResult?.direct_time_hours ?? 0;
+
+  const fuelDelta = (r: OptimizationResponse | null) => {
+    if (!r || baselineFuel <= 0) return null;
+    return ((r.total_fuel_mt - baselineFuel) / baselineFuel) * 100;
+  };
+
+  const safetyIcon = (r: OptimizationResponse | null) => {
+    if (!r?.safety) return '-';
+    switch (r.safety.status) {
+      case 'dangerous': return '\u26A0\uFE0F';
+      case 'marginal': return '\u26A0\uFE0F';
+      case 'safe': return '\u2713';
+      default: return '-';
+    }
+  };
+
+  const weights = ['fuel', 'balanced', 'safety'] as const;
 
   return (
     <div className="absolute bottom-4 left-4 z-[1000] w-96">
@@ -238,46 +257,22 @@ export default function RouteIndicatorPanel({
             onClick={onOptimize}
             disabled={isOptimizing || waypoints.length < 2 || !hasBaseline}
             className="flex-1 flex items-center justify-center gap-1.5 py-2 bg-gradient-to-r from-green-600 to-emerald-500 text-white text-sm font-medium rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
-            title={!hasBaseline ? 'Calculate Voyage first to establish baseline' : 'Compare routes using A* and VISIR engines'}
+            title={!hasBaseline ? 'Calculate Voyage first to establish baseline' : 'Run all 6 optimizations (A* + VISIR × Fuel/Balanced/Safety)'}
           >
             {isOptimizing ? (
-              <><Loader2 className="w-4 h-4 animate-spin" />Optimizing (A* + VISIR)...</>
+              <><Loader2 className="w-4 h-4 animate-spin" />Optimizing...</>
             ) : (
               <><Compass className="w-4 h-4" />Compare Routes</>
             )}
           </button>
         </div>
 
-        {/* Pareto comparison table */}
-        {hasPareto && (optimizationResults.astar || optimizationResults.visir) && (() => {
-          const ref = optimizationResults.astar || optimizationResults.visir;
-          const baselineFuel = ref!.baseline_fuel_mt ?? ref!.direct_fuel_mt;
-          const baselineDist = ref!.baseline_distance_nm ?? totalDistance;
-          const baselineTime = ref!.baseline_time_hours ?? ref!.direct_time_hours;
-          const weights = [0.0, 0.5, 1.0];
-
-          const getResult = (engine: EngineType, w: number) =>
-            paretoResults.find(r => r.engine === engine && r.weight === w)?.result ?? null;
-
-          const fuelDelta = (r: OptimizationResponse | null) => {
-            if (!r || baselineFuel <= 0) return null;
-            return ((r.total_fuel_mt - baselineFuel) / baselineFuel) * 100;
-          };
-
-          const safetyIcon = (r: OptimizationResponse | null) => {
-            if (!r?.safety) return '-';
-            switch (r.safety.status) {
-              case 'dangerous': return '\u26A0\uFE0F';
-              case 'marginal': return '\u26A0\uFE0F';
-              case 'safe': return '\u2713';
-              default: return '-';
-            }
-          };
-
+        {/* Route comparison table (always unified) */}
+        {hasAnyResults && (() => {
           return (
             <div className="px-3 pb-3">
               {/* Visibility toggles */}
-              <div className="flex items-center gap-2 mb-2">
+              <div className="flex flex-wrap items-center gap-1.5 mb-2">
                 <button
                   onClick={() => onRouteVisibilityChange({ ...routeVisibility, original: !routeVisibility.original })}
                   className="flex items-center gap-1 text-xs text-gray-400 hover:text-white transition-colors"
@@ -285,28 +280,29 @@ export default function RouteIndicatorPanel({
                   {routeVisibility.original ? <Eye className="w-3.5 h-3.5 text-blue-400" /> : <EyeOff className="w-3.5 h-3.5" />}
                   <span className="text-blue-400">Original</span>
                 </button>
-                {optimizationResults.astar && (
-                  <button
-                    onClick={() => onRouteVisibilityChange({ ...routeVisibility, astar: !routeVisibility.astar })}
-                    className="flex items-center gap-1 text-xs text-gray-400 hover:text-white transition-colors"
-                  >
-                    {routeVisibility.astar ? <Eye className="w-3.5 h-3.5 text-green-400" /> : <EyeOff className="w-3.5 h-3.5" />}
-                    <span className="text-green-400">A*</span>
-                  </button>
-                )}
-                {optimizationResults.visir && (
-                  <button
-                    onClick={() => onRouteVisibilityChange({ ...routeVisibility, visir: !routeVisibility.visir })}
-                    className="flex items-center gap-1 text-xs text-gray-400 hover:text-white transition-colors"
-                  >
-                    {routeVisibility.visir ? <Eye className="w-3.5 h-3.5 text-orange-400" /> : <EyeOff className="w-3.5 h-3.5" />}
-                    <span className="text-orange-400">VISIR</span>
-                  </button>
-                )}
+                {(Object.keys(ROUTE_STYLES) as OptimizedRouteKey[]).map(key => {
+                  const result = allResults[key];
+                  if (!result) return null;
+                  const style = ROUTE_STYLES[key];
+                  return (
+                    <button
+                      key={key}
+                      onClick={() => onRouteVisibilityChange({ ...routeVisibility, [key]: !routeVisibility[key] })}
+                      className="flex items-center gap-1 text-xs text-gray-400 hover:text-white transition-colors"
+                    >
+                      {routeVisibility[key] ? (
+                        <Eye className="w-3.5 h-3.5" style={{ color: style.color }} />
+                      ) : (
+                        <EyeOff className="w-3.5 h-3.5" />
+                      )}
+                      <span style={{ color: style.color }}>{style.label}</span>
+                    </button>
+                  );
+                })}
               </div>
 
               <div className="p-2 bg-white/5 border border-white/10 rounded-lg mb-2">
-                <div className="text-xs font-medium text-gray-300 mb-2">Route Comparison (Pareto)</div>
+                <div className="text-xs font-medium text-gray-300 mb-2">Route Comparison</div>
                 <table className="w-full text-xs">
                   <thead>
                     <tr className="text-gray-500">
@@ -319,14 +315,14 @@ export default function RouteIndicatorPanel({
                   </thead>
                   <tbody className="text-gray-300">
                     {/* A* section */}
-                    {paretoResults.some(r => r.engine === 'astar' && r.result) && (
+                    {weights.some(w => allResults[`astar_${w}`]) && (
                       <>
                         <tr><td colSpan={2 + weights.length} className="pt-1.5 pb-0.5 font-medium text-green-400">A*</td></tr>
                         <tr>
                           <td className="pl-2">Dist</td>
                           <td className="text-right">{baselineDist.toFixed(0)}</td>
                           {weights.map(w => {
-                            const r = getResult('astar', w);
+                            const r = allResults[`astar_${w}`];
                             return <td key={w} className="text-right">{r ? r.total_distance_nm.toFixed(0) : '-'}</td>;
                           })}
                         </tr>
@@ -334,7 +330,7 @@ export default function RouteIndicatorPanel({
                           <td className="pl-2">Fuel</td>
                           <td className="text-right">{baselineFuel.toFixed(1)}</td>
                           {weights.map(w => {
-                            const r = getResult('astar', w);
+                            const r = allResults[`astar_${w}`];
                             return <td key={w} className="text-right">{r ? r.total_fuel_mt.toFixed(1) : '-'}</td>;
                           })}
                         </tr>
@@ -342,7 +338,7 @@ export default function RouteIndicatorPanel({
                           <td className="pl-2">Fuel &Delta;</td>
                           <td className="text-right">-</td>
                           {weights.map(w => {
-                            const d = fuelDelta(getResult('astar', w));
+                            const d = fuelDelta(allResults[`astar_${w}`]);
                             if (d === null) return <td key={w} className="text-right">-</td>;
                             return (
                               <td key={w} className={`text-right ${d < 0 ? 'text-green-400' : d > 0 ? 'text-amber-400' : 'text-gray-300'}`}>
@@ -355,20 +351,20 @@ export default function RouteIndicatorPanel({
                           <td className="pl-2">Safety</td>
                           <td className="text-right">-</td>
                           {weights.map(w => (
-                            <td key={w} className="text-right">{safetyIcon(getResult('astar', w))}</td>
+                            <td key={w} className="text-right">{safetyIcon(allResults[`astar_${w}`])}</td>
                           ))}
                         </tr>
                       </>
                     )}
                     {/* VISIR section */}
-                    {paretoResults.some(r => r.engine === 'visir' && r.result) && (
+                    {weights.some(w => allResults[`visir_${w}`]) && (
                       <>
                         <tr><td colSpan={2 + weights.length} className="pt-2 pb-0.5 font-medium text-orange-400">VISIR</td></tr>
                         <tr>
                           <td className="pl-2">Dist</td>
                           <td className="text-right">{baselineDist.toFixed(0)}</td>
                           {weights.map(w => {
-                            const r = getResult('visir', w);
+                            const r = allResults[`visir_${w}`];
                             return <td key={w} className="text-right">{r ? r.total_distance_nm.toFixed(0) : '-'}</td>;
                           })}
                         </tr>
@@ -376,7 +372,7 @@ export default function RouteIndicatorPanel({
                           <td className="pl-2">Fuel</td>
                           <td className="text-right">{baselineFuel.toFixed(1)}</td>
                           {weights.map(w => {
-                            const r = getResult('visir', w);
+                            const r = allResults[`visir_${w}`];
                             return <td key={w} className="text-right">{r ? r.total_fuel_mt.toFixed(1) : '-'}</td>;
                           })}
                         </tr>
@@ -384,7 +380,7 @@ export default function RouteIndicatorPanel({
                           <td className="pl-2">Fuel &Delta;</td>
                           <td className="text-right">-</td>
                           {weights.map(w => {
-                            const d = fuelDelta(getResult('visir', w));
+                            const d = fuelDelta(allResults[`visir_${w}`]);
                             if (d === null) return <td key={w} className="text-right">-</td>;
                             return (
                               <td key={w} className={`text-right ${d < 0 ? 'text-green-400' : d > 0 ? 'text-amber-400' : 'text-gray-300'}`}>
@@ -397,7 +393,7 @@ export default function RouteIndicatorPanel({
                           <td className="pl-2">Safety</td>
                           <td className="text-right">-</td>
                           {weights.map(w => (
-                            <td key={w} className="text-right">{safetyIcon(getResult('visir', w))}</td>
+                            <td key={w} className="text-right">{safetyIcon(allResults[`visir_${w}`])}</td>
                           ))}
                         </tr>
                       </>
@@ -407,174 +403,27 @@ export default function RouteIndicatorPanel({
               </div>
 
               {/* Action buttons */}
-              <div className="flex gap-2">
+              <div className="flex gap-2 flex-wrap">
                 <button
                   onClick={onDismissOptimizedRoute}
                   className="py-2 px-3 text-xs border border-white/20 text-gray-300 rounded-lg hover:bg-white/5 transition-colors"
                 >
                   Dismiss
                 </button>
-                {optimizationResults.astar && (
+                {allResults.astar_fuel && (
                   <button
-                    onClick={() => onApplyOptimizedRoute('astar')}
+                    onClick={() => onApplyOptimizedRoute('astar_fuel')}
                     className="flex-1 py-2 text-xs bg-green-600 text-white rounded-lg hover:bg-green-500 transition-colors"
                   >
-                    Apply A*
+                    Apply A* Fuel
                   </button>
                 )}
-                {optimizationResults.visir && (
+                {allResults.visir_fuel && (
                   <button
-                    onClick={() => onApplyOptimizedRoute('visir')}
+                    onClick={() => onApplyOptimizedRoute('visir_fuel')}
                     className="flex-1 py-2 text-xs bg-orange-600 text-white rounded-lg hover:bg-orange-500 transition-colors"
                   >
-                    Apply VISIR
-                  </button>
-                )}
-              </div>
-            </div>
-          );
-        })()}
-
-        {/* Standard dual-engine comparison (non-Pareto) */}
-        {!hasPareto && (optimizationResults.astar || optimizationResults.visir) && (() => {
-          const astar = optimizationResults.astar;
-          const visir = optimizationResults.visir;
-          // Use baseline from whichever result is available
-          const ref = astar || visir;
-          const baselineFuel = ref!.baseline_fuel_mt ?? ref!.direct_fuel_mt;
-          const baselineTime = ref!.baseline_time_hours ?? ref!.direct_time_hours;
-          const baselineDist = ref!.baseline_distance_nm ?? totalDistance;
-
-          // Helper to get best scenario values from a result
-          const getScenarioVal = (r: OptimizationResponse | null, field: keyof SpeedScenario) => {
-            if (!r) return null;
-            const sc = r.scenarios?.find(s => s.strategy === selectedStrategy) || r.scenarios?.[0];
-            return sc ? (sc as any)[field] : (r as any)[field];
-          };
-
-          const astarFuel = getScenarioVal(astar, 'total_fuel_mt') ?? astar?.total_fuel_mt;
-          const visirFuel = getScenarioVal(visir, 'total_fuel_mt') ?? visir?.total_fuel_mt;
-          // Fuel change vs Original: negative = reduction (good), positive = increase (bad)
-          const astarFuelChange = baselineFuel > 0 && astarFuel != null ? (((astarFuel as number) - baselineFuel) / baselineFuel) * 100 : 0;
-          const visirFuelChange = baselineFuel > 0 && visirFuel != null ? (((visirFuel as number) - baselineFuel) / baselineFuel) * 100 : 0;
-
-          return (
-            <div className="px-3 pb-3">
-              {/* Visibility toggles */}
-              <div className="flex items-center gap-2 mb-2">
-                <button
-                  onClick={() => onRouteVisibilityChange({ ...routeVisibility, original: !routeVisibility.original })}
-                  className="flex items-center gap-1 text-xs text-gray-400 hover:text-white transition-colors"
-                  title="Toggle original route"
-                >
-                  {routeVisibility.original ? <Eye className="w-3.5 h-3.5 text-blue-400" /> : <EyeOff className="w-3.5 h-3.5" />}
-                  <span className="text-blue-400">Original</span>
-                </button>
-                {astar && (
-                  <button
-                    onClick={() => onRouteVisibilityChange({ ...routeVisibility, astar: !routeVisibility.astar })}
-                    className="flex items-center gap-1 text-xs text-gray-400 hover:text-white transition-colors"
-                    title="Toggle A* route"
-                  >
-                    {routeVisibility.astar ? <Eye className="w-3.5 h-3.5 text-green-400" /> : <EyeOff className="w-3.5 h-3.5" />}
-                    <span className="text-green-400">A*</span>
-                  </button>
-                )}
-                {visir && (
-                  <button
-                    onClick={() => onRouteVisibilityChange({ ...routeVisibility, visir: !routeVisibility.visir })}
-                    className="flex items-center gap-1 text-xs text-gray-400 hover:text-white transition-colors"
-                    title="Toggle VISIR route"
-                  >
-                    {routeVisibility.visir ? <Eye className="w-3.5 h-3.5 text-orange-400" /> : <EyeOff className="w-3.5 h-3.5" />}
-                    <span className="text-orange-400">VISIR</span>
-                  </button>
-                )}
-              </div>
-
-              {/* Comparison table */}
-              <div className="p-2 bg-white/5 border border-white/10 rounded-lg mb-2">
-                <div className="text-xs font-medium text-gray-300 mb-2">Route Comparison</div>
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="text-gray-500">
-                      <th className="text-left font-normal pb-1"></th>
-                      <th className="text-right font-normal pb-1 text-blue-400">Original</th>
-                      {astar && <th className="text-right font-normal pb-1 text-green-400">A*</th>}
-                      {visir && <th className="text-right font-normal pb-1 text-orange-400">VISIR</th>}
-                    </tr>
-                  </thead>
-                  <tbody className="text-gray-300">
-                    <tr>
-                      <td>Distance</td>
-                      <td className="text-right">{baselineDist.toFixed(0)} nm</td>
-                      {astar && <td className="text-right">{(getScenarioVal(astar, 'total_distance_nm') ?? astar.total_distance_nm).toFixed(0)} nm</td>}
-                      {visir && <td className="text-right">{(getScenarioVal(visir, 'total_distance_nm') ?? visir.total_distance_nm).toFixed(0)} nm</td>}
-                    </tr>
-                    <tr>
-                      <td>Fuel</td>
-                      <td className="text-right">{baselineFuel.toFixed(1)} mt</td>
-                      {astar && <td className="text-right">{(astarFuel as number).toFixed(1)} mt</td>}
-                      {visir && <td className="text-right">{(visirFuel as number).toFixed(1)} mt</td>}
-                    </tr>
-                    <tr className="font-medium">
-                      <td>Fuel &Delta;</td>
-                      <td className="text-right">-</td>
-                      {astar && (
-                        <td className={`text-right ${(astarFuelChange as number) < 0 ? 'text-green-400' : 'text-amber-400'}`}>
-                          {(astarFuelChange as number) > 0 ? '+' : ''}{(astarFuelChange as number).toFixed(1)}%
-                        </td>
-                      )}
-                      {visir && (
-                        <td className={`text-right ${(visirFuelChange as number) < 0 ? 'text-green-400' : 'text-amber-400'}`}>
-                          {(visirFuelChange as number) > 0 ? '+' : ''}{(visirFuelChange as number).toFixed(1)}%
-                        </td>
-                      )}
-                    </tr>
-                    <tr>
-                      <td>Time</td>
-                      <td className="text-right">{baselineTime.toFixed(1)} h</td>
-                      {astar && <td className="text-right">{(getScenarioVal(astar, 'total_time_hours') ?? astar.total_time_hours).toFixed(1)} h</td>}
-                      {visir && <td className="text-right">{(getScenarioVal(visir, 'total_time_hours') ?? visir.total_time_hours).toFixed(1)} h</td>}
-                    </tr>
-                    <tr>
-                      <td>Avg Speed</td>
-                      <td className="text-right">{baselineTime > 0 ? (baselineDist / baselineTime).toFixed(1) : '-'} kts</td>
-                      {astar && <td className="text-right">{(getScenarioVal(astar, 'avg_speed_kts') ?? astar.avg_speed_kts).toFixed(1)} kts</td>}
-                      {visir && <td className="text-right">{(getScenarioVal(visir, 'avg_speed_kts') ?? visir.avg_speed_kts).toFixed(1)} kts</td>}
-                    </tr>
-                    <tr>
-                      <td>Waypoints</td>
-                      <td className="text-right">{waypoints.length}</td>
-                      {astar && <td className="text-right">{astar.waypoints.length}</td>}
-                      {visir && <td className="text-right">{visir.waypoints.length}</td>}
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-
-              {/* Action buttons */}
-              <div className="flex gap-2">
-                <button
-                  onClick={onDismissOptimizedRoute}
-                  className="py-2 px-3 text-xs border border-white/20 text-gray-300 rounded-lg hover:bg-white/5 transition-colors"
-                >
-                  Dismiss
-                </button>
-                {astar && (
-                  <button
-                    onClick={() => onApplyOptimizedRoute('astar')}
-                    className="flex-1 py-2 text-xs bg-green-600 text-white rounded-lg hover:bg-green-500 transition-colors"
-                  >
-                    Apply A*
-                  </button>
-                )}
-                {visir && (
-                  <button
-                    onClick={() => onApplyOptimizedRoute('visir')}
-                    className="flex-1 py-2 text-xs bg-orange-600 text-white rounded-lg hover:bg-orange-500 transition-colors"
-                  >
-                    Apply VISIR
+                    Apply VISIR Fuel
                   </button>
                 )}
               </div>

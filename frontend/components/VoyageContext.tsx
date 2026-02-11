@@ -1,7 +1,8 @@
 'use client';
 
 import { createContext, useContext, useState, ReactNode } from 'react';
-import type { OptimizationStrategy } from '@/lib/api';
+import type { Position, AllOptimizationResults, RouteVisibility } from '@/lib/api';
+import { EMPTY_ALL_RESULTS, DEFAULT_ROUTE_VISIBILITY } from '@/lib/api';
 
 const ZONE_TYPES = ['eca', 'seca', 'hra', 'tss', 'vts', 'ice', 'canal', 'environmental', 'exclusion'] as const;
 
@@ -14,9 +15,15 @@ interface VoyageContextValue {
   useWeather: boolean;
   setUseWeather: (v: boolean) => void;
 
-  // Optimization strategy
-  optimizationStrategy: OptimizationStrategy;
-  setOptimizationStrategy: (v: OptimizationStrategy) => void;
+  // Route state (persisted across navigation)
+  waypoints: Position[];
+  setWaypoints: (v: Position[]) => void;
+  routeName: string;
+  setRouteName: (v: string) => void;
+  allResults: AllOptimizationResults;
+  setAllResults: (v: AllOptimizationResults) => void;
+  routeVisibility: RouteVisibility;
+  setRouteVisibility: (v: RouteVisibility) => void;
 
   // Zone visibility per type — all false by default
   zoneVisibility: Record<string, boolean>;
@@ -31,8 +38,13 @@ export function VoyageProvider({ children }: { children: ReactNode }) {
   const [calmSpeed, setCalmSpeed] = useState(14.5);
   const [isLaden, setIsLaden] = useState(true);
   const [useWeather, setUseWeather] = useState(true);
-  const [optimizationStrategy, setOptimizationStrategy] = useState<OptimizationStrategy>('fuel');
   const [isDrawingZone, setIsDrawingZone] = useState(false);
+
+  // Route state (persisted)
+  const [waypoints, setWaypoints] = useState<Position[]>([]);
+  const [routeName, setRouteName] = useState('Custom Route');
+  const [allResults, setAllResults] = useState<AllOptimizationResults>(EMPTY_ALL_RESULTS);
+  const [routeVisibility, setRouteVisibility] = useState<RouteVisibility>(DEFAULT_ROUTE_VISIBILITY);
 
   const [zoneVisibility, setZoneVisibility] = useState<Record<string, boolean>>(() => {
     const init: Record<string, boolean> = {};
@@ -50,7 +62,10 @@ export function VoyageProvider({ children }: { children: ReactNode }) {
         calmSpeed, setCalmSpeed,
         isLaden, setIsLaden,
         useWeather, setUseWeather,
-        optimizationStrategy, setOptimizationStrategy,
+        waypoints, setWaypoints,
+        routeName, setRouteName,
+        allResults, setAllResults,
+        routeVisibility, setRouteVisibility,
         zoneVisibility, setZoneTypeVisible,
         isDrawingZone, setIsDrawingZone,
       }}

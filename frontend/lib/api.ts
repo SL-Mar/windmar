@@ -386,26 +386,45 @@ export interface OptimizationResponse {
 // Dual-engine types
 export type EngineType = 'astar' | 'visir';
 
-export interface DualOptimizationResults {
-  astar: OptimizationResponse | null;
-  visir: OptimizationResponse | null;
-}
+export type OptimizedRouteKey =
+  | 'astar_fuel' | 'astar_balanced' | 'astar_safety'
+  | 'visir_fuel' | 'visir_balanced' | 'visir_safety';
+
+export type AllOptimizationResults = Record<OptimizedRouteKey, OptimizationResponse | null>;
 
 export interface RouteVisibility {
   original: boolean;
-  astar: boolean;
-  visir: boolean;
+  astar_fuel: boolean;
+  astar_balanced: boolean;
+  astar_safety: boolean;
+  visir_fuel: boolean;
+  visir_balanced: boolean;
+  visir_safety: boolean;
 }
 
-// Optimization strategy modes
-export type OptimizationStrategy = 'fuel' | 'pareto' | 'safety';
+export const ROUTE_STYLES: Record<OptimizedRouteKey, { color: string; dashArray: string; label: string }> = {
+  astar_fuel:     { color: '#22c55e', dashArray: '8, 4',  label: 'A* Fuel' },
+  astar_balanced: { color: '#4ade80', dashArray: '12, 6', label: 'A* Balanced' },
+  astar_safety:   { color: '#86efac', dashArray: '4, 4',  label: 'A* Safety' },
+  visir_fuel:     { color: '#f97316', dashArray: '8, 4',  label: 'VISIR Fuel' },
+  visir_balanced: { color: '#fb923c', dashArray: '12, 6', label: 'VISIR Balanced' },
+  visir_safety:   { color: '#fdba74', dashArray: '4, 4',  label: 'VISIR Safety' },
+};
 
-// Pareto result: one engine run at a specific safety weight
-export interface ParetoSolution {
-  engine: EngineType;
-  weight: number;
-  result: OptimizationResponse | null;
-}
+export const DEFAULT_ROUTE_VISIBILITY: RouteVisibility = {
+  original: true,
+  astar_fuel: true,
+  astar_balanced: false,
+  astar_safety: false,
+  visir_fuel: true,
+  visir_balanced: false,
+  visir_safety: false,
+};
+
+export const EMPTY_ALL_RESULTS: AllOptimizationResults = {
+  astar_fuel: null, astar_balanced: null, astar_safety: null,
+  visir_fuel: null, visir_balanced: null, visir_safety: null,
+};
 
 // Vessel types
 export interface VesselSpecs {
@@ -1011,6 +1030,15 @@ export const apiClient = {
     const formData = new FormData();
     formData.append('file', file);
     const response = await api.post('/api/vessel/noon-reports/upload-csv', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return response.data;
+  },
+
+  async uploadNoonReportsExcel(file: File): Promise<{ status: string; imported: number; total_reports: number }> {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await api.post('/api/vessel/noon-reports/upload-excel', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
     });
     return response.data;

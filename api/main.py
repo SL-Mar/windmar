@@ -3459,6 +3459,56 @@ async def upload_noon_reports_csv(
         raise HTTPException(status_code=400, detail=f"Failed to parse CSV: {str(e)}")
 
 
+@app.post("/api/vessel/noon-reports/upload-excel")
+@limiter.limit("10/minute")
+async def upload_noon_reports_excel(
+    request: Request,
+    file: UploadFile = File(...),
+    api_key=Depends(get_api_key),
+):
+    """
+    Upload noon reports from an Excel file (.xlsx/.xls).
+
+    Uses ExcelParser to auto-detect column mappings.
+    """
+    global vessel_calibrator
+
+    try:
+        content = await file.read()
+        if len(content) > MAX_CSV_SIZE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large. Maximum size: {MAX_CSV_SIZE_BYTES // (1024*1024)} MB"
+            )
+
+        # Determine suffix from filename
+        suffix = ".xlsx"
+        if file.filename:
+            suffix = Path(file.filename).suffix or ".xlsx"
+
+        import tempfile
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(content)
+            tmp_path = Path(tmp.name)
+
+        try:
+            count = vessel_calibrator.add_noon_reports_from_excel(tmp_path)
+        finally:
+            tmp_path.unlink()
+
+        return {
+            "status": "success",
+            "imported": count,
+            "total_reports": len(vessel_calibrator.noon_reports),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to import Excel: {e}", exc_info=True)
+        raise HTTPException(status_code=400, detail=f"Failed to parse Excel: {str(e)}")
+
+
 @app.delete("/api/vessel/noon-reports")
 @limiter.limit(get_rate_limit_string())
 async def clear_noon_reports(

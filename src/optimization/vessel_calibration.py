@@ -239,6 +239,49 @@ class VesselCalibrator:
         logger.info(f"Imported {count} noon reports from {csv_path}")
         return count
 
+    def add_noon_reports_from_excel(self, excel_path: Path) -> int:
+        """
+        Import noon reports from Excel file using ExcelParser.
+
+        Returns:
+            Number of reports imported
+        """
+        from src.database.excel_parser import ExcelParser
+
+        parser = ExcelParser(excel_path)
+        parsed = parser.parse()
+
+        count = 0
+        for row in parsed:
+            try:
+                report = NoonReport(
+                    timestamp=row['date'],
+                    latitude=row['latitude'],
+                    longitude=row['longitude'],
+                    speed_over_ground_kts=row.get('speed_kts', 0.0),
+                    fuel_consumption_mt=row['fuel_consumption_mt'],
+                    period_hours=24.0,
+                    is_laden=row.get('is_laden', True),
+                    heading_deg=row.get('course_deg', 0.0),
+                )
+
+                # Optional weather data — ExcelParser wind_speed is m/s, convert to kts
+                if 'wind_speed_bf' in row:
+                    report.wind_speed_kts = row['wind_speed_bf'] * 1.94384
+                if 'wind_direction_deg' in row:
+                    report.wind_direction_deg = row['wind_direction_deg']
+                if 'wave_height_m' in row:
+                    report.wave_height_m = row['wave_height_m']
+
+                self.noon_reports.append(report)
+                count += 1
+            except (KeyError, ValueError, TypeError) as e:
+                logger.warning(f"Failed to convert parsed row: {e}")
+                continue
+
+        logger.info(f"Imported {count} noon reports from Excel {excel_path}")
+        return count
+
     def _prepare_report_for_model(self, report: NoonReport) -> Tuple[float, Dict]:
         """
         Prepare noon report data for model comparison.

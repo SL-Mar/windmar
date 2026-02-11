@@ -206,10 +206,14 @@ function CalibrationSection() {
     setLoading(true);
     setError(null);
     try {
-      const r = await apiClient.uploadNoonReportsCSV(file);
+      const ext = file.name.split('.').pop()?.toLowerCase();
+      const isExcel = ext === 'xlsx' || ext === 'xls';
+      const r = isExcel
+        ? await apiClient.uploadNoonReportsExcel(file)
+        : await apiClient.uploadNoonReportsCSV(file);
       setReportsCount(r.total_reports);
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to upload CSV');
+      setError(err.response?.data?.detail || 'Failed to upload file');
     } finally {
       setLoading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -316,16 +320,16 @@ function CalibrationSection() {
             )}
           </div>
 
-          <input ref={fileInputRef} type="file" accept=".csv" onChange={handleFileUpload} className="hidden" />
+          <input ref={fileInputRef} type="file" accept=".csv,.xlsx,.xls" onChange={handleFileUpload} className="hidden" />
           <button
             onClick={() => fileInputRef.current?.click()}
             disabled={loading}
             className="w-full py-2 px-3 bg-maritime-dark border border-white/10 rounded text-sm text-gray-300 hover:text-white hover:border-primary-500/50 transition-colors flex items-center justify-center gap-2"
           >
             <FileSpreadsheet className="w-4 h-4" />
-            {loading ? 'Uploading...' : 'Upload Noon Reports CSV'}
+            {loading ? 'Uploading...' : 'Upload Noon Reports (CSV/Excel)'}
           </button>
-          <p className="text-xs text-gray-500">CSV with: timestamp, latitude, longitude, speed_over_ground_kts, fuel_consumption_mt</p>
+          <p className="text-xs text-gray-500">CSV or Excel with: date, latitude, longitude, speed, fuel_consumption</p>
         </div>
       </Card>
 
