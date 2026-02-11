@@ -361,7 +361,7 @@ export default function HomePage() {
       calm_speed_kts: calmSpeed,
       is_laden: isLaden,
       optimization_target: 'fuel' as const,
-      grid_resolution_deg: 0.1,
+      grid_resolution_deg: 0.2,
       max_time_factor: 1.15,
       route_waypoints: waypoints.length > 2 ? waypoints : undefined,
       baseline_fuel_mt: displayedAnalysis?.result.total_fuel_mt,
@@ -379,23 +379,27 @@ export default function HomePage() {
     ];
 
     try {
-      const promises = combos.map(({ engine, weight, key }) => {
-        debugLog('info', 'ROUTE', `Firing ${engine} w=${weight}...`);
-        return apiClient.optimizeRoute({ ...baseRequest, engine, safety_weight: weight })
-          .then(r => ({ key, result: r as OptimizationResponse | null }))
-          .catch(() => ({ key, result: null as OptimizationResponse | null }));
-      });
-
-      const settled = await Promise.all(promises);
-      const dt = ((performance.now() - t0) / 1000).toFixed(1);
-      const ok = settled.filter(r => r.result).length;
-      debugLog('info', 'ROUTE', `All-routes done in ${dt}s: ${ok}/6 succeeded`);
-
+      // Run sequentially per engine to avoid saturating the weather
+      // data connection pool (6 parallel requests overwhelm the backend).
+      // Results are pushed to the UI progressively so the user sees
+      // routes appear as they complete.
       const results = { ...EMPTY_ALL_RESULTS };
-      for (const { key, result } of settled) {
-        results[key] = result;
+
+      for (const { engine, weight, key } of combos) {
+        debugLog('info', 'ROUTE', `Firing ${engine} w=${weight}...`);
+        try {
+          const r = await apiClient.optimizeRoute({ ...baseRequest, engine, safety_weight: weight });
+          results[key] = r as OptimizationResponse | null;
+        } catch {
+          results[key] = null;
+        }
+        // Progressive update — show each result as it arrives
+        setAllResults({ ...results });
       }
-      setAllResults(results);
+
+      const dt = ((performance.now() - t0) / 1000).toFixed(1);
+      const ok = Object.values(results).filter(Boolean).length;
+      debugLog('info', 'ROUTE', `All-routes done in ${dt}s: ${ok}/6 succeeded`);
     } catch (error) {
       debugLog('error', 'ROUTE', `All-routes optimization failed: ${error}`);
     } finally {

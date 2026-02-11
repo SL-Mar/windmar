@@ -334,7 +334,7 @@ class OptimizationRequest(BaseModel):
     is_laden: bool = True
     departure_time: Optional[datetime] = None
     optimization_target: str = Field("fuel", description="Minimize 'fuel' or 'time'")
-    grid_resolution_deg: float = Field(0.1, ge=0.05, le=2.0, description="Grid resolution in degrees")
+    grid_resolution_deg: float = Field(0.2, ge=0.05, le=2.0, description="Grid resolution in degrees")
     max_time_factor: float = Field(1.15, ge=1.0, le=2.0,
         description="Max voyage time as multiple of direct time (1.15 = 15% longer allowed)")
     engine: str = Field("astar", description="Optimization engine: 'astar' (A* pathfinding) or 'visir' (VISIR graph-based Dijkstra)")
@@ -2928,7 +2928,7 @@ async def optimize_route(request: OptimizationRequest):
     Minimizes fuel consumption (or time) by routing around adverse weather.
 
     Grid resolution affects accuracy vs computation time:
-    - 0.1° = ~6nm cells, high accuracy, best land avoidance (default for A*)
+    - 0.2° = ~12nm cells, good land avoidance (default for A*)
     - 0.25° = ~15nm cells, good balance (default for VISIR)
     - 0.5° = ~30nm cells, faster, less precise
     """
