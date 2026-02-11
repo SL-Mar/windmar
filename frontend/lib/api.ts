@@ -930,7 +930,9 @@ export const apiClient = {
   // -------------------------------------------------------------------------
 
   async optimizeRoute(request: OptimizationRequest): Promise<OptimizationResponse> {
-    const response = await api.post<OptimizationResponse>('/api/optimize/route', request);
+    const response = await api.post<OptimizationResponse>('/api/optimize/route', request, {
+      timeout: 60000, // 60s timeout per engine
+    });
     return response.data;
   },
 

@@ -345,7 +345,7 @@ export default function RouteIndicatorPanel({
                     </tr>
                     <tr>
                       <td>Avg Speed</td>
-                      <td className="text-right">-</td>
+                      <td className="text-right">{baselineTime > 0 ? (baselineDist / baselineTime).toFixed(1) : '-'} kts</td>
                       {astar && <td className="text-right">{(getScenarioVal(astar, 'avg_speed_kts') ?? astar.avg_speed_kts).toFixed(1)} kts</td>}
                       {visir && <td className="text-right">{(getScenarioVal(visir, 'avg_speed_kts') ?? visir.avg_speed_kts).toFixed(1)} kts</td>}
                     </tr>
