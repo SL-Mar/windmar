@@ -261,8 +261,9 @@ export default function RouteIndicatorPanel({
 
           const astarFuel = getScenarioVal(astar, 'total_fuel_mt') ?? astar?.total_fuel_mt;
           const visirFuel = getScenarioVal(visir, 'total_fuel_mt') ?? visir?.total_fuel_mt;
-          const astarSavings = getScenarioVal(astar, 'fuel_savings_pct') ?? astar?.fuel_savings_pct;
-          const visirSavings = getScenarioVal(visir, 'fuel_savings_pct') ?? visir?.fuel_savings_pct;
+          // Compute savings vs the displayed Original baseline (not the backend's direct-route comparison)
+          const astarSavings = baselineFuel > 0 && astarFuel != null ? ((baselineFuel - (astarFuel as number)) / baselineFuel) * 100 : 0;
+          const visirSavings = baselineFuel > 0 && visirFuel != null ? ((baselineFuel - (visirFuel as number)) / baselineFuel) * 100 : 0;
 
           return (
             <div className="px-3 pb-3">
