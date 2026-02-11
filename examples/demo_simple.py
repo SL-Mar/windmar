@@ -269,9 +269,9 @@ def run_demo_without_grib():
     logger.info("")
     logger.info("Next steps:")
     logger.info("  1. Install dependencies: pip install -r requirements.txt")
-    logger.info("  2. For GRIB support: Install ECCODES, then pygrib")
-    logger.info("  3. Run full example: python examples/example_ara_med.py")
-    logger.info("  4. Calibrate with your noon reports: python examples/example_calibration.py")
+    logger.info("  2. Run full example: python examples/example_ara_med.py")
+    logger.info("  3. Calibrate with your noon reports: python examples/example_calibration.py")
+    logger.info("  4. For weather-aware routing, use Docker Compose: docker compose up -d --build")
     logger.info("")
 
 

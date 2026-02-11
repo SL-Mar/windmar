@@ -170,15 +170,20 @@ Services start on:
 
 ### Manual Setup
 
+> **Important**: The frontend requires the backend API to be running. Start the backend first, then the frontend in a separate terminal.
+
 ```bash
-# Backend
+# Terminal 1 — Backend API (must be running for the frontend to work)
 pip install -r requirements.txt
 python api/main.py
+# API starts on http://localhost:8000
 
-# Frontend (separate terminal)
+# Terminal 2 — Frontend
 cd frontend
+cp .env.example .env.local   # Sets API URL to http://localhost:8000
 npm install --legacy-peer-deps
 npm run dev
+# Frontend starts on http://localhost:3000
 ```
 
 ### Python Examples
