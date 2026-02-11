@@ -3,9 +3,9 @@
 import { useState, useRef } from 'react';
 import {
   PenLine, Upload, Navigation, Compass, Loader2, ChevronDown, ChevronUp,
-  Trash2, MapPin, Play,
+  Trash2, MapPin, Play, Eye, EyeOff,
 } from 'lucide-react';
-import { Position, OptimizationResponse, SpeedScenario } from '@/lib/api';
+import { Position, OptimizationResponse, SpeedScenario, EngineType, DualOptimizationResults, RouteVisibility } from '@/lib/api';
 import SavedRoutes from '@/components/SavedRoutes';
 import RouteImport from '@/components/RouteImport';
 
@@ -20,9 +20,11 @@ interface RouteIndicatorPanelProps {
   onCalculate: () => void;
   isOptimizing: boolean;
   onOptimize: () => void;
-  optimizationResult: OptimizationResponse | null;
-  onApplyOptimizedRoute: () => void;
+  optimizationResults: DualOptimizationResults;
+  onApplyOptimizedRoute: (engine: EngineType) => void;
   onDismissOptimizedRoute: () => void;
+  routeVisibility: RouteVisibility;
+  onRouteVisibilityChange: (v: RouteVisibility) => void;
   onRouteImport: (waypoints: Position[], name: string) => void;
   onLoadRoute: (waypoints: Position[]) => void;
   onClearRoute: () => void;
@@ -45,10 +47,12 @@ export default function RouteIndicatorPanel({
   onCalculate,
   isOptimizing,
   onOptimize,
-  optimizationResult,
+  optimizationResults,
   onApplyOptimizedRoute,
   onDismissOptimizedRoute,
   onRouteImport,
+  routeVisibility,
+  onRouteVisibilityChange,
   onLoadRoute,
   onClearRoute,
   hasBaseline,
@@ -129,7 +133,7 @@ export default function RouteIndicatorPanel({
   const lastWp = waypoints[waypoints.length - 1];
 
   return (
-    <div className="absolute bottom-4 left-4 z-[1000] w-80">
+    <div className="absolute bottom-4 left-4 z-[1000] w-96">
       <div className="bg-maritime-dark/90 backdrop-blur-md border border-white/10 rounded-xl shadow-2xl overflow-hidden">
         {/* Route header */}
         <div className="p-3 flex items-center justify-between">
@@ -228,106 +232,157 @@ export default function RouteIndicatorPanel({
             onClick={onOptimize}
             disabled={isOptimizing || waypoints.length < 2 || !hasBaseline}
             className="flex-1 flex items-center justify-center gap-1.5 py-2 bg-gradient-to-r from-green-600 to-emerald-500 text-white text-sm font-medium rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
-            title={!hasBaseline ? 'Calculate Voyage first to establish baseline' : 'Optimize route using A* search'}
+            title={!hasBaseline ? 'Calculate Voyage first to establish baseline' : 'Compare routes using A* and VISIR engines'}
           >
             {isOptimizing ? (
-              <><Loader2 className="w-4 h-4 animate-spin" />Optimizing...</>
+              <><Loader2 className="w-4 h-4 animate-spin" />Optimizing (A* + VISIR)...</>
             ) : (
-              <><Compass className="w-4 h-4" />Optimize A*</>
+              <><Compass className="w-4 h-4" />Compare Routes</>
             )}
           </button>
         </div>
 
-        {/* Optimized route comparison */}
-        {optimizationResult && (() => {
-          const scenarios = optimizationResult.scenarios ?? [];
-          const scenario = scenarios.find(s => s.strategy === selectedStrategy) || scenarios[0];
-          const baselineFuel = optimizationResult.baseline_fuel_mt ?? optimizationResult.direct_fuel_mt;
-          const baselineTime = optimizationResult.baseline_time_hours ?? optimizationResult.direct_time_hours;
-          const baselineDist = optimizationResult.baseline_distance_nm ?? totalDistance;
-          const fuelSavings = scenario?.fuel_savings_pct ?? optimizationResult.fuel_savings_pct;
-          const isPositive = fuelSavings > 0;
+        {/* Dual-engine route comparison */}
+        {(optimizationResults.astar || optimizationResults.visir) && (() => {
+          const astar = optimizationResults.astar;
+          const visir = optimizationResults.visir;
+          // Use baseline from whichever result is available
+          const ref = astar || visir;
+          const baselineFuel = ref!.baseline_fuel_mt ?? ref!.direct_fuel_mt;
+          const baselineTime = ref!.baseline_time_hours ?? ref!.direct_time_hours;
+          const baselineDist = ref!.baseline_distance_nm ?? totalDistance;
+
+          // Helper to get best scenario values from a result
+          const getScenarioVal = (r: OptimizationResponse | null, field: keyof SpeedScenario) => {
+            if (!r) return null;
+            const sc = r.scenarios?.find(s => s.strategy === selectedStrategy) || r.scenarios?.[0];
+            return sc ? (sc as any)[field] : (r as any)[field];
+          };
+
+          const astarFuel = getScenarioVal(astar, 'total_fuel_mt') ?? astar?.total_fuel_mt;
+          const visirFuel = getScenarioVal(visir, 'total_fuel_mt') ?? visir?.total_fuel_mt;
+          const astarSavings = getScenarioVal(astar, 'fuel_savings_pct') ?? astar?.fuel_savings_pct;
+          const visirSavings = getScenarioVal(visir, 'fuel_savings_pct') ?? visir?.fuel_savings_pct;
 
           return (
             <div className="px-3 pb-3">
-              {/* Strategy tabs */}
-              {scenarios.length > 1 && (
-                <div className="flex gap-1 mb-2">
-                  {scenarios.map(sc => (
-                    <button
-                      key={sc.strategy}
-                      onClick={() => setSelectedStrategy(sc.strategy)}
-                      className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-colors ${
-                        selectedStrategy === sc.strategy
-                          ? 'bg-green-600/30 text-green-300 border border-green-500/50'
-                          : 'bg-white/5 text-gray-400 border border-white/10 hover:bg-white/10'
-                      }`}
-                    >
-                      {sc.label}
-                    </button>
-                  ))}
-                </div>
-              )}
+              {/* Visibility toggles */}
+              <div className="flex items-center gap-2 mb-2">
+                <button
+                  onClick={() => onRouteVisibilityChange({ ...routeVisibility, original: !routeVisibility.original })}
+                  className="flex items-center gap-1 text-xs text-gray-400 hover:text-white transition-colors"
+                  title="Toggle original route"
+                >
+                  {routeVisibility.original ? <Eye className="w-3.5 h-3.5 text-blue-400" /> : <EyeOff className="w-3.5 h-3.5" />}
+                  <span className="text-blue-400">Original</span>
+                </button>
+                {astar && (
+                  <button
+                    onClick={() => onRouteVisibilityChange({ ...routeVisibility, astar: !routeVisibility.astar })}
+                    className="flex items-center gap-1 text-xs text-gray-400 hover:text-white transition-colors"
+                    title="Toggle A* route"
+                  >
+                    {routeVisibility.astar ? <Eye className="w-3.5 h-3.5 text-green-400" /> : <EyeOff className="w-3.5 h-3.5" />}
+                    <span className="text-green-400">A*</span>
+                  </button>
+                )}
+                {visir && (
+                  <button
+                    onClick={() => onRouteVisibilityChange({ ...routeVisibility, visir: !routeVisibility.visir })}
+                    className="flex items-center gap-1 text-xs text-gray-400 hover:text-white transition-colors"
+                    title="Toggle VISIR route"
+                  >
+                    {routeVisibility.visir ? <Eye className="w-3.5 h-3.5 text-orange-400" /> : <EyeOff className="w-3.5 h-3.5" />}
+                    <span className="text-orange-400">VISIR</span>
+                  </button>
+                )}
+              </div>
 
-              <div className={`p-2 ${isPositive ? 'bg-green-500/10 border border-green-500/30' : 'bg-amber-500/10 border border-amber-500/30'} rounded-lg mb-2`}>
-                <div className="flex justify-between text-xs mb-2">
-                  <span className={`${isPositive ? 'text-green-400' : 'text-amber-400'} font-medium`}>Route Comparison</span>
-                  <span className={isPositive ? 'text-green-400' : 'text-amber-400'}>
-                    {isPositive
-                      ? `${fuelSavings.toFixed(1)}% fuel savings`
-                      : `${Math.abs(fuelSavings).toFixed(1)}% fuel increase`}
-                  </span>
-                </div>
+              {/* Comparison table */}
+              <div className="p-2 bg-white/5 border border-white/10 rounded-lg mb-2">
+                <div className="text-xs font-medium text-gray-300 mb-2">Route Comparison</div>
                 <table className="w-full text-xs">
                   <thead>
                     <tr className="text-gray-500">
                       <th className="text-left font-normal pb-1"></th>
-                      <th className="text-right font-normal pb-1 text-blue-400">Baseline</th>
-                      <th className="text-right font-normal pb-1 text-green-400">Optimized</th>
+                      <th className="text-right font-normal pb-1 text-blue-400">Original</th>
+                      {astar && <th className="text-right font-normal pb-1 text-green-400">A*</th>}
+                      {visir && <th className="text-right font-normal pb-1 text-orange-400">VISIR</th>}
                     </tr>
                   </thead>
                   <tbody className="text-gray-300">
                     <tr>
                       <td>Distance</td>
                       <td className="text-right">{baselineDist.toFixed(0)} nm</td>
-                      <td className="text-right">{(scenario?.total_distance_nm ?? optimizationResult.total_distance_nm).toFixed(0)} nm</td>
+                      {astar && <td className="text-right">{(getScenarioVal(astar, 'total_distance_nm') ?? astar.total_distance_nm).toFixed(0)} nm</td>}
+                      {visir && <td className="text-right">{(getScenarioVal(visir, 'total_distance_nm') ?? visir.total_distance_nm).toFixed(0)} nm</td>}
                     </tr>
                     <tr>
                       <td>Fuel</td>
                       <td className="text-right">{baselineFuel.toFixed(1)} mt</td>
-                      <td className="text-right">{(scenario?.total_fuel_mt ?? optimizationResult.total_fuel_mt).toFixed(1)} mt</td>
+                      {astar && <td className="text-right">{(astarFuel as number).toFixed(1)} mt</td>}
+                      {visir && <td className="text-right">{(visirFuel as number).toFixed(1)} mt</td>}
+                    </tr>
+                    <tr className="font-medium">
+                      <td>Savings</td>
+                      <td className="text-right">-</td>
+                      {astar && (
+                        <td className={`text-right ${(astarSavings as number) > 0 ? 'text-green-400' : 'text-amber-400'}`}>
+                          {(astarSavings as number) > 0 ? '+' : ''}{(astarSavings as number).toFixed(1)}%
+                        </td>
+                      )}
+                      {visir && (
+                        <td className={`text-right ${(visirSavings as number) > 0 ? 'text-orange-400' : 'text-amber-400'}`}>
+                          {(visirSavings as number) > 0 ? '+' : ''}{(visirSavings as number).toFixed(1)}%
+                        </td>
+                      )}
                     </tr>
                     <tr>
                       <td>Time</td>
                       <td className="text-right">{baselineTime.toFixed(1)} h</td>
-                      <td className="text-right">{(scenario?.total_time_hours ?? optimizationResult.total_time_hours).toFixed(1)} h</td>
+                      {astar && <td className="text-right">{(getScenarioVal(astar, 'total_time_hours') ?? astar.total_time_hours).toFixed(1)} h</td>}
+                      {visir && <td className="text-right">{(getScenarioVal(visir, 'total_time_hours') ?? visir.total_time_hours).toFixed(1)} h</td>}
                     </tr>
                     <tr>
                       <td>Avg Speed</td>
                       <td className="text-right">-</td>
-                      <td className="text-right">{(scenario?.avg_speed_kts ?? optimizationResult.avg_speed_kts).toFixed(1)} kts</td>
+                      {astar && <td className="text-right">{(getScenarioVal(astar, 'avg_speed_kts') ?? astar.avg_speed_kts).toFixed(1)} kts</td>}
+                      {visir && <td className="text-right">{(getScenarioVal(visir, 'avg_speed_kts') ?? visir.avg_speed_kts).toFixed(1)} kts</td>}
                     </tr>
                     <tr>
                       <td>Waypoints</td>
                       <td className="text-right">{waypoints.length}</td>
-                      <td className="text-right">{optimizationResult.waypoints.length}</td>
+                      {astar && <td className="text-right">{astar.waypoints.length}</td>}
+                      {visir && <td className="text-right">{visir.waypoints.length}</td>}
                     </tr>
                   </tbody>
                 </table>
               </div>
+
+              {/* Action buttons */}
               <div className="flex gap-2">
                 <button
                   onClick={onDismissOptimizedRoute}
-                  className="flex-1 py-2 text-sm border border-white/20 text-gray-300 rounded-lg hover:bg-white/5 transition-colors"
+                  className="py-2 px-3 text-xs border border-white/20 text-gray-300 rounded-lg hover:bg-white/5 transition-colors"
                 >
                   Dismiss
                 </button>
-                <button
-                  onClick={onApplyOptimizedRoute}
-                  className="flex-1 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-500 transition-colors"
-                >
-                  Apply
-                </button>
+                {astar && (
+                  <button
+                    onClick={() => onApplyOptimizedRoute('astar')}
+                    className="flex-1 py-2 text-xs bg-green-600 text-white rounded-lg hover:bg-green-500 transition-colors"
+                  >
+                    Apply A*
+                  </button>
+                )}
+                {visir && (
+                  <button
+                    onClick={() => onApplyOptimizedRoute('visir')}
+                    className="flex-1 py-2 text-xs bg-orange-600 text-white rounded-lg hover:bg-orange-500 transition-colors"
+                  >
+                    Apply VISIR
+                  </button>
+                )}
               </div>
             </div>
           );

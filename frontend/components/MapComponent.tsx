@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import { Loader2 } from 'lucide-react';
-import { Position, WindFieldData, WaveFieldData, VelocityData, CreateZoneRequest, WaveForecastFrames } from '@/lib/api';
+import { Position, WindFieldData, WaveFieldData, VelocityData, CreateZoneRequest, WaveForecastFrames, DualOptimizationResults, RouteVisibility } from '@/lib/api';
 
 // Dynamic imports for map components (client-side only)
 const MapContainer = dynamic(
@@ -57,6 +57,10 @@ const Polyline = dynamic(
   () => import('react-leaflet').then((mod) => mod.Polyline),
   { ssr: false }
 );
+const Tooltip = dynamic(
+  () => import('react-leaflet').then((mod) => mod.Tooltip),
+  { ssr: false }
+);
 
 const DEFAULT_CENTER: [number, number] = [45, 10];
 const DEFAULT_ZOOM = 5;
@@ -83,7 +87,8 @@ export interface MapComponentProps {
   onForecastHourChange?: (hour: number, data: VelocityData[] | null) => void;
   onWaveForecastHourChange?: (hour: number, allFrames: WaveForecastFrames | null) => void;
   onCurrentForecastHourChange?: (hour: number, allFrames: any | null) => void;
-  optimizedWaypoints?: Position[];
+  optimizationResults?: DualOptimizationResults;
+  routeVisibility?: RouteVisibility;
   onViewportChange?: (viewport: { bounds: { lat_min: number; lat_max: number; lon_min: number; lon_max: number }; zoom: number }) => void;
   viewportBounds?: { lat_min: number; lat_max: number; lon_min: number; lon_max: number } | null;
   weatherModelLabel?: string;
@@ -110,7 +115,8 @@ export default function MapComponent({
   onForecastHourChange,
   onWaveForecastHourChange,
   onCurrentForecastHourChange,
-  optimizedWaypoints,
+  optimizationResults,
+  routeVisibility,
   onViewportChange,
   viewportBounds = null,
   weatherModelLabel,
@@ -205,19 +211,37 @@ export default function MapComponent({
           waypoints={waypoints}
           onWaypointsChange={onWaypointsChange}
           isEditing={isEditing}
+          routeColor={routeVisibility?.original === false ? 'transparent' : undefined}
         />
 
-        {/* Optimized route overlay (green dashed) */}
-        {optimizedWaypoints && optimizedWaypoints.length >= 2 && (
+        {/* A* optimized route overlay (green dashed) */}
+        {routeVisibility?.astar && optimizationResults?.astar && optimizationResults.astar.waypoints.length >= 2 && (
           <Polyline
-            positions={optimizedWaypoints.map(wp => [wp.lat, wp.lon] as [number, number])}
+            positions={optimizationResults.astar.waypoints.map(wp => [wp.lat, wp.lon] as [number, number])}
             pathOptions={{
               color: '#22c55e',
               weight: 3,
               opacity: 0.85,
-              dashArray: '8, 6',
+              dashArray: '8, 4',
             }}
-          />
+          >
+            <Tooltip sticky>A* optimized route</Tooltip>
+          </Polyline>
+        )}
+
+        {/* VISIR optimized route overlay (orange dashed) */}
+        {routeVisibility?.visir && optimizationResults?.visir && optimizationResults.visir.waypoints.length >= 2 && (
+          <Polyline
+            positions={optimizationResults.visir.waypoints.map(wp => [wp.lat, wp.lon] as [number, number])}
+            pathOptions={{
+              color: '#f97316',
+              weight: 3,
+              opacity: 0.85,
+              dashArray: '8, 4',
+            }}
+          >
+            <Tooltip sticky>VISIR optimized route</Tooltip>
+          </Polyline>
         )}
       </MapContainer>
 

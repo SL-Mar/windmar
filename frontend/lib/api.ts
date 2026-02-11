@@ -296,6 +296,8 @@ export interface OptimizationRequest {
   baseline_fuel_mt?: number;
   baseline_time_hours?: number;
   baseline_distance_nm?: number;
+  // Engine selection (astar or visir)
+  engine?: 'astar' | 'visir';
 }
 
 export interface WeatherProvenance {
@@ -375,6 +377,22 @@ export interface OptimizationResponse {
   grid_resolution_deg: number;
   cells_explored: number;
   optimization_time_ms: number;
+  // Engine identifier
+  engine?: string;
+}
+
+// Dual-engine types
+export type EngineType = 'astar' | 'visir';
+
+export interface DualOptimizationResults {
+  astar: OptimizationResponse | null;
+  visir: OptimizationResponse | null;
+}
+
+export interface RouteVisibility {
+  original: boolean;
+  astar: boolean;
+  visir: boolean;
 }
 
 // Vessel types

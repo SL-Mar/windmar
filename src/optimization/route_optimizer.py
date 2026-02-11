@@ -30,6 +30,7 @@ from src.optimization.voyage import LegWeather
 from src.optimization.seakeeping import SafetyConstraints, SafetyStatus, create_default_safety_constraints
 from src.data.land_mask import is_ocean, is_path_clear, get_land_mask_status
 from src.data.regulatory_zones import get_zone_checker, ZoneChecker
+from src.optimization.base_optimizer import BaseOptimizer, OptimizedRoute
 
 logger = logging.getLogger(__name__)
 
@@ -60,49 +61,6 @@ class SearchNode:
 
 
 @dataclass
-class OptimizedRoute:
-    """Result of route optimization."""
-    waypoints: List[Tuple[float, float]]  # (lat, lon) pairs
-    total_fuel_mt: float
-    total_time_hours: float
-    total_distance_nm: float
-
-    # Comparison with direct route
-    direct_fuel_mt: float
-    direct_time_hours: float
-    fuel_savings_pct: float
-    time_savings_pct: float
-
-    # Per-leg details
-    leg_details: List[Dict]
-
-    # Speed profile (for variable speed optimization)
-    speed_profile: List[float]  # Optimal speed per leg (kts)
-    avg_speed_kts: float  # Average speed over voyage
-
-    # Safety assessment
-    safety_status: str  # "safe", "marginal", "dangerous"
-    safety_warnings: List[str]
-    max_roll_deg: float
-    max_pitch_deg: float
-    max_accel_ms2: float
-
-    # Metadata
-    grid_resolution_deg: float
-    cells_explored: int
-    optimization_time_ms: float
-    variable_speed_enabled: bool
-
-    # Speed strategy scenarios (populated when baseline provided)
-    scenarios: List['SpeedScenario'] = field(default_factory=list)
-
-    # Baseline reference (from voyage calculation)
-    baseline_fuel_mt: float = 0.0
-    baseline_time_hours: float = 0.0
-    baseline_distance_nm: float = 0.0
-
-
-@dataclass
 class SpeedScenario:
     """One speed strategy applied to the optimized path."""
     strategy: str            # "constant_speed" or "match_eta"
@@ -117,7 +75,7 @@ class SpeedScenario:
     time_savings_pct: float   # vs baseline
 
 
-class RouteOptimizer:
+class RouteOptimizer(BaseOptimizer):
     """
     A* based route optimizer.
 
@@ -163,7 +121,7 @@ class RouteOptimizer:
             enforce_zones: Whether to apply zone penalties/exclusions
             variable_speed: Enable per-leg speed optimization
         """
-        self.vessel_model = vessel_model or VesselModel()
+        super().__init__(vessel_model=vessel_model)
         self.resolution_deg = resolution_deg
         self.optimization_target = optimization_target
         self.enforce_safety = enforce_safety
@@ -564,7 +522,7 @@ class RouteOptimizer:
         Must be admissible (never overestimate actual cost).
         """
         # Great circle distance
-        distance_nm = self._haversine_distance(
+        distance_nm = self.haversine(
             cell.lat, cell.lon, goal.lat, goal.lon
         )
 
@@ -601,7 +559,7 @@ class RouteOptimizer:
             Tuple of (cost, travel_time_hours)
         """
         # Calculate distance
-        distance_nm = self._haversine_distance(
+        distance_nm = self.haversine(
             from_cell.lat, from_cell.lon, to_cell.lat, to_cell.lon
         )
 
@@ -617,7 +575,7 @@ class RouteOptimizer:
             weather = LegWeather()  # Calm conditions fallback
 
         # Calculate bearing
-        bearing = self._calculate_bearing(
+        bearing = self.bearing(
             from_cell.lat, from_cell.lon, to_cell.lat, to_cell.lon
         )
 
@@ -639,8 +597,7 @@ class RouteOptimizer:
         )
 
         # Calculate actual travel time considering current
-        current_effect = self._calculate_current_effect(
-            vessel_speed_kts=calm_speed_kts,
+        current_effect = self.current_effect(
             heading_deg=bearing,
             current_speed_ms=weather.current_speed_ms,
             current_dir_deg=weather.current_dir_deg,
@@ -691,32 +648,6 @@ class RouteOptimizer:
             time_penalty = self._lambda_time * travel_time_hours
             return fuel_cost + time_penalty, travel_time_hours
 
-    def _calculate_current_effect(
-        self,
-        vessel_speed_kts: float,
-        heading_deg: float,
-        current_speed_ms: float,
-        current_dir_deg: float,
-    ) -> float:
-        """
-        Calculate effect of current on speed over ground.
-
-        Returns speed adjustment in knots (positive = favorable, negative = adverse).
-        """
-        if current_speed_ms <= 0:
-            return 0.0
-
-        current_kts = current_speed_ms * 1.94384
-
-        # Relative angle between heading and current
-        relative_angle = abs(((current_dir_deg - heading_deg) + 180) % 360 - 180)
-        relative_rad = math.radians(relative_angle)
-
-        # Component of current in direction of travel
-        current_effect = current_kts * math.cos(relative_rad)
-
-        return current_effect
-
     def _find_optimal_speed(
         self,
         distance_nm: float,
@@ -759,8 +690,7 @@ class RouteOptimizer:
         }
 
         # Calculate current effect (constant for all speeds)
-        current_effect = self._calculate_current_effect(
-            vessel_speed_kts=12.0,  # Representative speed
+        current_effect = self.current_effect(
             heading_deg=bearing_deg,
             current_speed_ms=weather.current_speed_ms,
             current_dir_deg=weather.current_dir_deg,
@@ -941,10 +871,10 @@ class RouteOptimizer:
         result = [waypoints[0]]
 
         for i in range(1, len(waypoints) - 1):
-            bearing_in = self._calculate_bearing(
+            bearing_in = self.bearing(
                 result[-1][0], result[-1][1], waypoints[i][0], waypoints[i][1]
             )
-            bearing_out = self._calculate_bearing(
+            bearing_out = self.bearing(
                 waypoints[i][0], waypoints[i][1], waypoints[i + 1][0], waypoints[i + 1][1]
             )
             turn = abs(((bearing_out - bearing_in) + 180) % 360 - 180)
@@ -1005,8 +935,8 @@ class RouteOptimizer:
             from_wp = waypoints[i]
             to_wp = waypoints[i + 1]
 
-            distance = self._haversine_distance(from_wp[0], from_wp[1], to_wp[0], to_wp[1])
-            bearing = self._calculate_bearing(from_wp[0], from_wp[1], to_wp[0], to_wp[1])
+            distance = self.haversine(from_wp[0], from_wp[1], to_wp[0], to_wp[1])
+            bearing = self.bearing(from_wp[0], from_wp[1], to_wp[0], to_wp[1])
 
             # Get weather at midpoint
             mid_lat = (from_wp[0] + to_wp[0]) / 2
@@ -1045,8 +975,8 @@ class RouteOptimizer:
                 )
                 fuel_mt = result['fuel_mt']
 
-                current_effect = self._calculate_current_effect(
-                    calm_speed_kts, bearing, weather.current_speed_ms, weather.current_dir_deg
+                current_effect = self.current_effect(
+                    bearing, weather.current_speed_ms, weather.current_dir_deg
                 )
                 sog = max(calm_speed_kts + current_effect, 0.1)
                 time_hours = distance / sog
@@ -1054,8 +984,8 @@ class RouteOptimizer:
             speed_profile.append(leg_speed)
 
             # Calculate SOG for this leg
-            current_effect = self._calculate_current_effect(
-                leg_speed, bearing, weather.current_speed_ms, weather.current_dir_deg
+            current_effect = self.current_effect(
+                bearing, weather.current_speed_ms, weather.current_dir_deg
             )
             sog = max(leg_speed + current_effect, 0.1)
 
@@ -1143,8 +1073,8 @@ class RouteOptimizer:
         for i in range(len(waypoints) - 1):
             from_wp = waypoints[i]
             to_wp = waypoints[i + 1]
-            distance = self._haversine_distance(from_wp[0], from_wp[1], to_wp[0], to_wp[1])
-            bearing = self._calculate_bearing(from_wp[0], from_wp[1], to_wp[0], to_wp[1])
+            distance = self.haversine(from_wp[0], from_wp[1], to_wp[0], to_wp[1])
+            bearing = self.bearing(from_wp[0], from_wp[1], to_wp[0], to_wp[1])
 
             mid_lat = (from_wp[0] + to_wp[0]) / 2
             mid_lon = (from_wp[1] + to_wp[1]) / 2
@@ -1194,8 +1124,8 @@ class RouteOptimizer:
             speed_profile.append(leg_speed)
 
             # SOG for this leg
-            current_effect = self._calculate_current_effect(
-                leg_speed, bearing, weather.current_speed_ms, weather.current_dir_deg
+            current_effect = self.current_effect(
+                bearing, weather.current_speed_ms, weather.current_dir_deg
             )
             sog = max(leg_speed + current_effect, 0.1)
 
@@ -1252,30 +1182,3 @@ class RouteOptimizer:
         logger.info(f"Time-constrained recalc: {total_time:.1f}h (budget={max_time_hours:.1f}h), fuel={total_fuel:.1f}mt")
         return total_fuel, total_time, total_distance, leg_details, safety_summary, speed_profile
 
-    @staticmethod
-    def _haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-        """Calculate great circle distance in nautical miles."""
-        R = 3440.065  # Earth radius in nm
-
-        lat1_rad = math.radians(lat1)
-        lat2_rad = math.radians(lat2)
-        dlat = math.radians(lat2 - lat1)
-        dlon = math.radians(lon2 - lon1)
-
-        a = math.sin(dlat/2)**2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon/2)**2
-        c = 2 * math.asin(math.sqrt(a))
-
-        return R * c
-
-    @staticmethod
-    def _calculate_bearing(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-        """Calculate initial bearing from point 1 to point 2."""
-        lat1_rad = math.radians(lat1)
-        lat2_rad = math.radians(lat2)
-        dlon_rad = math.radians(lon2 - lon1)
-
-        x = math.sin(dlon_rad) * math.cos(lat2_rad)
-        y = math.cos(lat1_rad) * math.sin(lat2_rad) - math.sin(lat1_rad) * math.cos(lat2_rad) * math.cos(dlon_rad)
-
-        bearing = math.degrees(math.atan2(x, y))
-        return (bearing + 360) % 360

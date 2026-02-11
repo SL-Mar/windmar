@@ -47,7 +47,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.optimization.vessel_model import VesselModel, VesselSpecs
 from src.optimization.voyage import VoyageCalculator, LegWeather
-from src.optimization.route_optimizer import RouteOptimizer, OptimizedRoute
+from src.optimization.base_optimizer import OptimizedRoute
+from src.optimization.route_optimizer import RouteOptimizer
+from src.optimization.visir_optimizer import VisirOptimizer
 from src.optimization.grid_weather_provider import GridWeatherProvider
 from src.optimization.temporal_weather_provider import TemporalGridWeatherProvider, WeatherProvenance
 from src.optimization.weather_assessment import RouteWeatherAssessment
@@ -335,6 +337,7 @@ class OptimizationRequest(BaseModel):
     grid_resolution_deg: float = Field(0.5, ge=0.1, le=2.0, description="Grid resolution in degrees")
     max_time_factor: float = Field(1.15, ge=1.0, le=2.0,
         description="Max voyage time as multiple of direct time (1.15 = 15% longer allowed)")
+    engine: str = Field("astar", description="Optimization engine: 'astar' (A* pathfinding) or 'visir' (VISIR graph-based Dijkstra)")
     # All user waypoints for multi-segment optimization (respects intermediate via-points)
     route_waypoints: Optional[List[Position]] = None
     # Baseline from voyage calculation (enables dual-strategy comparison)
@@ -416,6 +419,9 @@ class OptimizationResponse(BaseModel):
     speed_profile: List[float]  # Optimal speed per leg (kts)
     avg_speed_kts: float
     variable_speed_enabled: bool
+
+    # Engine used
+    engine: str = "astar"  # "astar" or "visir"
 
     # Safety assessment
     safety: Optional[SafetySummary] = None
@@ -624,6 +630,7 @@ current_vessel_model = VesselModel(specs=current_vessel_specs)
 voyage_calculator = VoyageCalculator(vessel_model=current_vessel_model)
 monte_carlo_sim = MonteCarloSimulator(voyage_calculator=voyage_calculator)
 route_optimizer = RouteOptimizer(vessel_model=current_vessel_model)
+visir_optimizer = VisirOptimizer(vessel_model=current_vessel_model)
 
 # Vessel calibration state
 vessel_calibrator = VesselCalibrator(vessel_specs=current_vessel_specs)
@@ -2910,28 +2917,31 @@ async def get_weather_along_route(
 @app.post("/api/optimize/route", response_model=OptimizationResponse)
 async def optimize_route(request: OptimizationRequest):
     """
-    Find optimal route through weather using A* search.
+    Find optimal route through weather.
+
+    Supports two optimization engines selected via the ``engine`` field:
+    - **astar** (default): A* grid search with weather-aware cost function
+    - **visir**: VISIR-style Dijkstra with time-expanded graph and voluntary speed reduction
 
     Minimizes fuel consumption (or time) by routing around adverse weather.
-
-    The algorithm:
-    1. Builds a grid around the origin-destination corridor
-    2. Uses A* search with weather-aware cost function
-    3. Smooths the resulting path to create navigable waypoints
-    4. Returns optimized route with fuel/time savings comparison
 
     Grid resolution affects accuracy vs computation time:
     - 0.25° = ~15nm cells, high accuracy, slower
     - 0.5° = ~30nm cells, good balance (default)
     - 1.0° = ~60nm cells, fast, less precise
     """
-    global route_optimizer
+    global route_optimizer, visir_optimizer
 
     departure = request.departure_time or datetime.utcnow()
 
-    # Configure optimizer
-    route_optimizer.resolution_deg = request.grid_resolution_deg
-    route_optimizer.optimization_target = request.optimization_target
+    # Select optimization engine
+    engine_name = request.engine.lower()
+    if engine_name == "visir":
+        active_optimizer = visir_optimizer
+    else:
+        active_optimizer = route_optimizer
+    active_optimizer.resolution_deg = request.grid_resolution_deg
+    active_optimizer.optimization_target = request.optimization_target
 
     try:
         # ── Temporal weather provisioning (DB-first) ──────────────────
@@ -3018,19 +3028,30 @@ async def optimize_route(request: OptimizationRequest):
         if request.route_waypoints and len(request.route_waypoints) > 2:
             route_wps = [(wp.lat, wp.lon) for wp in request.route_waypoints]
 
-        result = route_optimizer.optimize_route(
-            origin=(request.origin.lat, request.origin.lon),
-            destination=(request.destination.lat, request.destination.lon),
-            departure_time=departure,
-            calm_speed_kts=request.calm_speed_kts,
-            is_laden=request.is_laden,
-            weather_provider=wx_provider,
-            max_time_factor=request.max_time_factor,
-            baseline_time_hours=request.baseline_time_hours,
-            baseline_fuel_mt=request.baseline_fuel_mt,
-            baseline_distance_nm=request.baseline_distance_nm,
-            route_waypoints=route_wps,
-        )
+        # A* engine accepts extra dev params; VISIR uses base interface
+        if engine_name == "visir":
+            result = active_optimizer.optimize_route(
+                origin=(request.origin.lat, request.origin.lon),
+                destination=(request.destination.lat, request.destination.lon),
+                departure_time=departure,
+                calm_speed_kts=request.calm_speed_kts,
+                is_laden=request.is_laden,
+                weather_provider=wx_provider,
+            )
+        else:
+            result = active_optimizer.optimize_route(
+                origin=(request.origin.lat, request.origin.lon),
+                destination=(request.destination.lat, request.destination.lon),
+                departure_time=departure,
+                calm_speed_kts=request.calm_speed_kts,
+                is_laden=request.is_laden,
+                weather_provider=wx_provider,
+                max_time_factor=request.max_time_factor,
+                baseline_time_hours=request.baseline_time_hours,
+                baseline_fuel_mt=request.baseline_fuel_mt,
+                baseline_distance_nm=request.baseline_distance_nm,
+                route_waypoints=route_wps,
+            )
 
         # Format response
         waypoints = [Position(lat=wp[0], lon=wp[1]) for wp in result.waypoints]
@@ -3124,6 +3145,7 @@ async def optimize_route(request: OptimizationRequest):
             speed_profile=[round(s, 1) for s in result.speed_profile],
             avg_speed_kts=round(result.avg_speed_kts, 1),
             variable_speed_enabled=result.variable_speed_enabled,
+            engine=engine_name,
             safety=safety_summary,
             scenarios=scenario_models,
             baseline_fuel_mt=round(result.baseline_fuel_mt, 2) if result.baseline_fuel_mt else None,
@@ -3269,7 +3291,7 @@ async def set_calibration_factors(
 
     Requires authentication via API key.
     """
-    global current_calibration, current_vessel_model, voyage_calculator, route_optimizer
+    global current_calibration, current_vessel_model, voyage_calculator, route_optimizer, visir_optimizer
 
     current_calibration = CalibrationFactors(
         calm_water=factors.calm_water,
@@ -3289,6 +3311,7 @@ async def set_calibration_factors(
     current_vessel_model = vessel_state.model
     voyage_calculator = vessel_state.voyage_calculator
     route_optimizer = vessel_state.route_optimizer
+    visir_optimizer = vessel_state.visir_optimizer
 
     return {"status": "success", "message": "Calibration factors updated"}
 
@@ -3451,7 +3474,7 @@ async def calibrate_vessel(
     compared to actual fuel consumption.
     """
     global vessel_calibrator, current_calibration
-    global current_vessel_model, voyage_calculator, route_optimizer
+    global current_vessel_model, voyage_calculator, route_optimizer, visir_optimizer
 
     if len(vessel_calibrator.noon_reports) < VesselCalibrator.MIN_REPORTS:
         raise HTTPException(
@@ -3477,6 +3500,7 @@ async def calibrate_vessel(
         )
         voyage_calculator = VoyageCalculator(vessel_model=current_vessel_model)
         route_optimizer = RouteOptimizer(vessel_model=current_vessel_model)
+        visir_optimizer = VisirOptimizer(vessel_model=current_vessel_model)
 
         # Save calibration to file
         vessel_calibrator.save_calibration("default", current_calibration)

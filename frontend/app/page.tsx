@@ -7,7 +7,7 @@ import MapOverlayControls from '@/components/MapOverlayControls';
 import RouteIndicatorPanel from '@/components/RouteIndicatorPanel';
 import AnalysisSlidePanel from '@/components/AnalysisSlidePanel';
 import { useVoyage } from '@/components/VoyageContext';
-import { apiClient, Position, WindFieldData, WaveFieldData, VelocityData, VoyageResponse, OptimizationResponse, CreateZoneRequest, WaveForecastFrames } from '@/lib/api';
+import { apiClient, Position, WindFieldData, WaveFieldData, VelocityData, VoyageResponse, OptimizationResponse, CreateZoneRequest, WaveForecastFrames, EngineType, DualOptimizationResults, RouteVisibility } from '@/lib/api';
 import { getAnalyses, saveAnalysis, deleteAnalysis, updateAnalysisMonteCarlo, AnalysisEntry } from '@/lib/analysisStorage';
 import { debugLog } from '@/lib/debugLog';
 import DebugConsole from '@/components/DebugConsole';
@@ -28,8 +28,9 @@ export default function HomePage() {
   // Results
   const [isCalculating, setIsCalculating] = useState(false);
 
-  // Optimization
-  const [optimizationResult, setOptimizationResult] = useState<OptimizationResponse | null>(null);
+  // Optimization (dual engine)
+  const [optimizationResults, setOptimizationResults] = useState<DualOptimizationResults>({ astar: null, visir: null });
+  const [routeVisibility, setRouteVisibility] = useState<RouteVisibility>({ original: true, astar: true, visir: true });
   const [isOptimizing, setIsOptimizing] = useState(false);
 
   // Weather visualization
@@ -295,6 +296,7 @@ export default function HomePage() {
     setWaypoints([]);
     setRouteName('Custom Route');
     setDisplayedAnalysisId(null);
+    setOptimizationResults({ astar: null, visir: null });
   };
 
   // Get displayed analysis for route indicator and optimization baseline
@@ -341,7 +343,7 @@ export default function HomePage() {
     }
   };
 
-  // Optimize route
+  // Optimize route (dual engine: A* + VISIR in parallel)
   const handleOptimize = async () => {
     if (waypoints.length < 2) {
       alert('Please add at least 2 waypoints (origin and destination)');
@@ -349,66 +351,66 @@ export default function HomePage() {
     }
 
     setIsOptimizing(true);
-    setOptimizationResult(null);
+    setOptimizationResults({ astar: null, visir: null });
 
     const t0 = performance.now();
-    debugLog('info', 'ROUTE', `Optimizing: ${waypoints[0].lat.toFixed(2)},${waypoints[0].lon.toFixed(2)} → ${waypoints[waypoints.length-1].lat.toFixed(2)},${waypoints[waypoints.length-1].lon.toFixed(2)}, speed=${calmSpeed}kts`);
+    debugLog('info', 'ROUTE', `Dual optimize: ${waypoints[0].lat.toFixed(2)},${waypoints[0].lon.toFixed(2)} → ${waypoints[waypoints.length-1].lat.toFixed(2)},${waypoints[waypoints.length-1].lon.toFixed(2)}, speed=${calmSpeed}kts`);
+
+    const baseRequest = {
+      origin: waypoints[0],
+      destination: waypoints[waypoints.length - 1],
+      calm_speed_kts: calmSpeed,
+      is_laden: isLaden,
+      optimization_target: 'fuel' as const,
+      grid_resolution_deg: 0.5,
+      max_time_factor: 1.15,
+      route_waypoints: waypoints.length > 2 ? waypoints : undefined,
+      baseline_fuel_mt: displayedAnalysis?.result.total_fuel_mt,
+      baseline_time_hours: displayedAnalysis?.result.total_time_hours,
+      baseline_distance_nm: displayedAnalysis?.result.total_distance_nm,
+    };
 
     try {
-      const result = await apiClient.optimizeRoute({
-        origin: waypoints[0],
-        destination: waypoints[waypoints.length - 1],
-        calm_speed_kts: calmSpeed,
-        is_laden: isLaden,
-        optimization_target: 'fuel',
-        grid_resolution_deg: 0.5,
-        max_time_factor: 1.15,
-        route_waypoints: waypoints.length > 2 ? waypoints : undefined,
-        baseline_fuel_mt: displayedAnalysis?.result.total_fuel_mt,
-        baseline_time_hours: displayedAnalysis?.result.total_time_hours,
-        baseline_distance_nm: displayedAnalysis?.result.total_distance_nm,
-      });
+      const [astarResult, visirResult] = await Promise.allSettled([
+        apiClient.optimizeRoute({ ...baseRequest, engine: 'astar' }),
+        apiClient.optimizeRoute({ ...baseRequest, engine: 'visir' }),
+      ]);
 
-      const dt = ((performance.now() - t0) / 1000).toFixed(1);
-      debugLog('info', 'ROUTE', `Optimized in ${dt}s: ${result.waypoints.length} waypoints, ${result.cells_explored} cells, temporal=${result.temporal_weather}, savings=${result.fuel_savings_pct?.toFixed(1)}%`);
-      setOptimizationResult(result);
+      const astar = astarResult.status === 'fulfilled' ? astarResult.value : null;
+      const visir = visirResult.status === 'fulfilled' ? visirResult.value : null;
 
-      const savings = result.fuel_savings_pct > 0
-        ? `Fuel savings: ${result.fuel_savings_pct.toFixed(1)}%`
-        : `Fuel increase: ${Math.abs(result.fuel_savings_pct).toFixed(1)}% (direct route is more efficient)`;
-
-      let wxInfo = '';
-      if (result.temporal_weather && result.weather_provenance?.length) {
-        const sources = result.weather_provenance.map(
-          (p) => `${p.model_name}: ${p.confidence} confidence (${p.forecast_lead_hours}h lead)`
-        ).join('\n  ');
-        wxInfo = `\n\nWeather: Time-varying (temporal)\n  ${sources}`;
-      } else {
-        wxInfo = '\n\nWeather: Single snapshot';
+      if (astarResult.status === 'rejected') {
+        debugLog('error', 'ROUTE', `A* failed: ${astarResult.reason}`);
+      }
+      if (visirResult.status === 'rejected') {
+        debugLog('error', 'ROUTE', `VISIR failed: ${visirResult.reason}`);
       }
 
-      alert(`Route optimized!\n\n${savings}\nCells explored: ${result.cells_explored}\nTime: ${result.optimization_time_ms.toFixed(0)}ms${wxInfo}`);
+      const dt = ((performance.now() - t0) / 1000).toFixed(1);
+      debugLog('info', 'ROUTE', `Dual optimize done in ${dt}s: A*=${astar ? astar.waypoints.length + 'wps' : 'failed'}, VISIR=${visir ? visir.waypoints.length + 'wps' : 'failed'}`);
+
+      setOptimizationResults({ astar, visir });
 
     } catch (error) {
-      debugLog('error', 'ROUTE', `Optimization failed: ${error}`);
-      alert('Route optimization failed. Please check the backend is running.');
+      debugLog('error', 'ROUTE', `Dual optimization failed: ${error}`);
     } finally {
       setIsOptimizing(false);
     }
   };
 
-  // Apply optimized route
-  const applyOptimizedRoute = () => {
-    if (optimizationResult) {
-      setWaypoints(optimizationResult.waypoints);
-      setOptimizationResult(null);
+  // Apply optimized route from a specific engine
+  const applyOptimizedRoute = (engine: EngineType) => {
+    const result = optimizationResults[engine];
+    if (result) {
+      setWaypoints(result.waypoints);
+      setOptimizationResults({ astar: null, visir: null });
       setDisplayedAnalysisId(null);
     }
   };
 
-  // Dismiss optimized route (keep original)
+  // Dismiss optimized routes (keep original)
   const dismissOptimizedRoute = () => {
-    setOptimizationResult(null);
+    setOptimizationResults({ astar: null, visir: null });
   };
 
   // Save new zone
@@ -500,7 +502,8 @@ export default function HomePage() {
             waypoints={waypoints}
             onWaypointsChange={setWaypoints}
             isEditing={isEditing}
-            optimizedWaypoints={optimizationResult?.waypoints}
+            optimizationResults={optimizationResults}
+            routeVisibility={routeVisibility}
             weatherLayer={weatherLayer}
             windData={windData}
             waveData={waveData}
@@ -543,7 +546,7 @@ export default function HomePage() {
               onCalculate={handleCalculate}
               isOptimizing={isOptimizing}
               onOptimize={handleOptimize}
-              optimizationResult={optimizationResult}
+              optimizationResults={optimizationResults}
               onApplyOptimizedRoute={applyOptimizedRoute}
               onDismissOptimizedRoute={dismissOptimizedRoute}
               onRouteImport={handleRouteImport}
@@ -553,6 +556,8 @@ export default function HomePage() {
               analysisFuel={displayedAnalysis?.result.total_fuel_mt}
               analysisTime={displayedAnalysis?.result.total_time_hours}
               analysisAvgSpeed={displayedAnalysis?.result.avg_sog_kts}
+              routeVisibility={routeVisibility}
+              onRouteVisibilityChange={setRouteVisibility}
             />
 
             <AnalysisSlidePanel
