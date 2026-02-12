@@ -108,6 +108,53 @@ class DbWeatherProvider:
         """Load current data from DB, cropped to bbox. Returns None if unavailable."""
         return self._load_vector_data("cmems_current", "current_u", "current_v", lat_min, lat_max, lon_min, lon_max)
 
+    def get_ice_from_db(
+        self,
+        lat_min: float,
+        lat_max: float,
+        lon_min: float,
+        lon_max: float,
+        time: Optional[datetime] = None,
+    ) -> Optional[WeatherData]:
+        """Load ice concentration from DB, cropped to bbox. Returns None if unavailable.
+
+        If time is given and multi-timestep ice forecast data exists,
+        selects the closest available forecast hour.
+        """
+        run_id = self._find_latest_run("cmems_ice")
+        if run_id is None:
+            return None
+
+        forecast_hour = 0
+        if time is not None:
+            forecast_hour = self._best_forecast_hour(run_id, time)
+
+        conn = self._get_conn()
+        try:
+            grid = self._load_grid(conn, run_id, forecast_hour, "ice_siconc")
+            if grid is None:
+                return None
+
+            lats, lons, siconc = grid
+            lats_c, lons_c, siconc_crop = self._crop_grid(
+                lats, lons, siconc, lat_min, lat_max, lon_min, lon_max
+            )
+
+            return WeatherData(
+                parameter="ice_concentration",
+                time=datetime.utcnow(),
+                lats=lats_c,
+                lons=lons_c,
+                values=siconc_crop,
+                unit="fraction",
+                ice_concentration=siconc_crop,
+            )
+        except Exception as e:
+            logger.error(f"Failed to load ice data from DB: {e}")
+            return None
+        finally:
+            conn.close()
+
     def _load_vector_data(
         self,
         source: str,

@@ -532,6 +532,93 @@ class WeatherIngestionService:
         finally:
             conn.close()
 
+    def ingest_ice_forecast_frames(self, frames: dict):
+        """Store multi-timestep ice forecast frames into PostgreSQL.
+
+        Args:
+            frames: Dict mapping forecast_hour (int) -> WeatherData.
+                    Each WeatherData has ice_concentration (siconc).
+                    Expected hours: 0, 24, 48, ..., 216 (10 daily steps).
+        """
+        if not frames:
+            return
+
+        source = "cmems_ice"
+        run_time = datetime.now(timezone.utc)
+        forecast_hours = sorted(frames.keys())
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+
+            # Supersede any existing complete ice runs
+            cur.execute(
+                """UPDATE weather_forecast_runs SET status = 'superseded'
+                   WHERE source = %s AND status = 'complete'""",
+                (source,),
+            )
+
+            cur.execute(
+                """INSERT INTO weather_forecast_runs
+                   (source, run_time, status, grid_resolution,
+                    lat_min, lat_max, lon_min, lon_max, forecast_hours)
+                   VALUES (%s, %s, 'ingesting', %s, %s, %s, %s, %s, %s)
+                   RETURNING id""",
+                (source, run_time, 0.083,
+                 self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
+                 forecast_hours),
+            )
+            run_id = cur.fetchone()[0]
+            conn.commit()
+
+            ingested_count = 0
+            for fh in forecast_hours:
+                wd = frames[fh]
+                try:
+                    lats_blob = self._compress(np.asarray(wd.lats))
+                    lons_blob = self._compress(np.asarray(wd.lons))
+                    rows = len(wd.lats)
+                    cols = len(wd.lons)
+
+                    arr = wd.ice_concentration if wd.ice_concentration is not None else wd.values
+                    if arr is None:
+                        continue
+                    cur.execute(
+                        """INSERT INTO weather_grid_data
+                           (run_id, forecast_hour, parameter, lats, lons, data, shape_rows, shape_cols)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                           ON CONFLICT (run_id, forecast_hour, parameter)
+                           DO UPDATE SET data = EXCLUDED.data,
+                                        lats = EXCLUDED.lats,
+                                        lons = EXCLUDED.lons,
+                                        shape_rows = EXCLUDED.shape_rows,
+                                        shape_cols = EXCLUDED.shape_cols""",
+                        (run_id, fh, "ice_siconc", lats_blob, lons_blob,
+                         self._compress(np.asarray(arr)), rows, cols),
+                    )
+
+                    ingested_count += 1
+                    conn.commit()
+                except Exception as e:
+                    logger.error(f"Failed to ingest ice forecast f{fh:03d}: {e}")
+                    conn.rollback()
+
+            status = "complete" if ingested_count > 0 else "failed"
+            cur.execute(
+                "UPDATE weather_forecast_runs SET status = %s WHERE id = %s",
+                (status, run_id),
+            )
+            conn.commit()
+            logger.info(
+                f"Ice forecast DB ingestion {status}: "
+                f"{ingested_count}/{len(forecast_hours)} hours"
+            )
+
+        except Exception as e:
+            logger.error(f"Ice forecast frame ingestion failed: {e}")
+            conn.rollback()
+        finally:
+            conn.close()
+
     def _compress(self, arr: np.ndarray) -> bytes:
         """zlib-compress a numpy array (stored as float32 to halve size)."""
         return zlib.compress(arr.astype(np.float32).tobytes())

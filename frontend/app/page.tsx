@@ -7,7 +7,7 @@ import MapOverlayControls from '@/components/MapOverlayControls';
 import RouteIndicatorPanel from '@/components/RouteIndicatorPanel';
 import AnalysisSlidePanel from '@/components/AnalysisSlidePanel';
 import { useVoyage } from '@/components/VoyageContext';
-import { apiClient, Position, WindFieldData, WaveFieldData, VelocityData, OptimizationResponse, CreateZoneRequest, WaveForecastFrames, OptimizedRouteKey, AllOptimizationResults, EMPTY_ALL_RESULTS } from '@/lib/api';
+import { apiClient, Position, WindFieldData, WaveFieldData, VelocityData, OptimizationResponse, CreateZoneRequest, WaveForecastFrames, IceForecastFrames, OptimizedRouteKey, AllOptimizationResults, EMPTY_ALL_RESULTS } from '@/lib/api';
 import { getAnalyses, saveAnalysis, deleteAnalysis, updateAnalysisMonteCarlo, AnalysisEntry } from '@/lib/analysisStorage';
 import { debugLog } from '@/lib/debugLog';
 import DebugConsole from '@/components/DebugConsole';
@@ -254,6 +254,43 @@ export default function HomePage() {
       colorscale: allFrames.colorscale,
     };
     setWaveData(synth);
+  }, [loadWeatherData]);
+
+  // Handle ice forecast hour change
+  const handleIceForecastHourChange = useCallback((hour: number, allFrames: IceForecastFrames | null) => {
+    setForecastHour(hour);
+    if (!allFrames) {
+      debugLog('warn', 'ICE', `Hour ${hour}: no frame data available`);
+      if (hour === 0) loadWeatherData();
+      return;
+    }
+    const frame = allFrames.frames?.[String(hour)];
+    if (!frame || !frame.data) {
+      debugLog('warn', 'ICE', `Hour ${hour}: frame not found in ${Object.keys(allFrames.frames).length} frames`);
+      return;
+    }
+    debugLog('info', 'ICE', `Frame Day ${hour / 24}: grid=${allFrames.ny}x${allFrames.nx}`);
+
+    setExtendedWeatherData({
+      parameter: 'ice_concentration',
+      time: allFrames.run_time,
+      bbox: {
+        lat_min: allFrames.lats[0],
+        lat_max: allFrames.lats[allFrames.lats.length - 1],
+        lon_min: allFrames.lons[0],
+        lon_max: allFrames.lons[allFrames.lons.length - 1],
+      },
+      resolution: allFrames.lats.length > 1 ? Math.abs(allFrames.lats[1] - allFrames.lats[0]) : 1,
+      nx: allFrames.nx,
+      ny: allFrames.ny,
+      lats: allFrames.lats,
+      lons: allFrames.lons,
+      data: frame.data,
+      unit: 'fraction',
+      ocean_mask: allFrames.ocean_mask,
+      ocean_mask_lats: allFrames.ocean_mask_lats,
+      ocean_mask_lons: allFrames.ocean_mask_lons,
+    });
   }, [loadWeatherData]);
 
   // Handle current forecast hour change
@@ -559,6 +596,7 @@ export default function HomePage() {
             onForecastHourChange={handleForecastHourChange}
             onWaveForecastHourChange={handleWaveForecastHourChange}
             onCurrentForecastHourChange={handleCurrentForecastHourChange}
+            onIceForecastHourChange={handleIceForecastHourChange}
             onViewportChange={setViewport}
             viewportBounds={viewport?.bounds ?? null}
             weatherModelLabel={weatherModelLabel}

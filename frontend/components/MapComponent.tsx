@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import { Loader2 } from 'lucide-react';
-import { Position, WindFieldData, WaveFieldData, VelocityData, CreateZoneRequest, WaveForecastFrames, AllOptimizationResults, RouteVisibility, OptimizedRouteKey, ROUTE_STYLES } from '@/lib/api';
+import { Position, WindFieldData, WaveFieldData, VelocityData, CreateZoneRequest, WaveForecastFrames, IceForecastFrames, AllOptimizationResults, RouteVisibility, OptimizedRouteKey, ROUTE_STYLES } from '@/lib/api';
 
 // Dynamic imports for map components (client-side only)
 const MapContainer = dynamic(
@@ -87,6 +87,7 @@ export interface MapComponentProps {
   onForecastHourChange?: (hour: number, data: VelocityData[] | null) => void;
   onWaveForecastHourChange?: (hour: number, allFrames: WaveForecastFrames | null) => void;
   onCurrentForecastHourChange?: (hour: number, allFrames: any | null) => void;
+  onIceForecastHourChange?: (hour: number, allFrames: IceForecastFrames | null) => void;
   allResults?: AllOptimizationResults;
   routeVisibility?: RouteVisibility;
   onViewportChange?: (viewport: { bounds: { lat_min: number; lat_max: number; lon_min: number; lon_max: number }; zoom: number }) => void;
@@ -116,6 +117,7 @@ export default function MapComponent({
   onForecastHourChange,
   onWaveForecastHourChange,
   onCurrentForecastHourChange,
+  onIceForecastHourChange,
   allResults,
   routeVisibility,
   onViewportChange,
@@ -267,7 +269,8 @@ export default function MapComponent({
           onForecastHourChange={onForecastHourChange}
           onWaveForecastHourChange={onWaveForecastHourChange}
           onCurrentForecastHourChange={onCurrentForecastHourChange}
-          layerType={weatherLayer === 'none' ? 'wind' : weatherLayer}
+          onIceForecastHourChange={onIceForecastHourChange}
+          layerType={(['wind', 'waves', 'currents', 'ice'] as const).includes(weatherLayer as any) ? weatherLayer as any : 'wind'}
           viewportBounds={viewportBounds}
         />
       )}

@@ -986,7 +986,7 @@ def get_ice_field(
     """
     Get sea ice concentration field.
 
-    Provider chain: CMEMS live → Synthetic.
+    Provider chain: Redis → DB → CMEMS live → Synthetic.
     """
     if time is None:
         time = datetime.utcnow()
@@ -995,6 +995,14 @@ def get_ice_field(
     cached = _redis_cache_get(cache_key)
     if cached is not None:
         return cached
+
+    # Try PostgreSQL (from previous ice forecast ingestion)
+    if db_weather is not None:
+        ice_data = db_weather.get_ice_from_db(lat_min, lat_max, lon_min, lon_max, time)
+        if ice_data is not None:
+            logger.info("Ice data served from DB")
+            _redis_cache_put(cache_key, ice_data, CACHE_TTL_MINUTES * 60)
+            return ice_data
 
     ice_data = copernicus_provider.fetch_ice_data(lat_min, lat_max, lon_min, lon_max, time)
     if ice_data is None:
@@ -2309,6 +2317,308 @@ async def api_get_current_forecast_frames(
         return {
             "run_time": "",
             "total_hours": 41,
+            "cached_hours": 0,
+            "source": "none",
+            "lats": [],
+            "lons": [],
+            "ny": 0,
+            "nx": 0,
+            "frames": {},
+        }
+
+    return cached
+
+
+# =========================================================================
+# Ice Forecast Endpoints (CMEMS, 10-day daily)
+# =========================================================================
+
+_ice_prefetch_running = False
+_ice_prefetch_lock = None
+_ICE_CACHE_DIR = Path("/tmp/windmar_ice_cache")
+_ICE_CACHE_DIR.mkdir(exist_ok=True)
+
+_REDIS_ICE_PREFETCH_LOCK = "windmar:ice_prefetch_lock"
+_REDIS_ICE_PREFETCH_STATUS = "windmar:ice_prefetch_running"
+
+
+def _get_ice_prefetch_lock():
+    global _ice_prefetch_lock
+    if _ice_prefetch_lock is None:
+        import threading
+        _ice_prefetch_lock = threading.Lock()
+    return _ice_prefetch_lock
+
+
+def _is_ice_prefetch_running() -> bool:
+    r = _get_redis()
+    if r is not None:
+        try:
+            return r.exists(_REDIS_ICE_PREFETCH_STATUS) > 0
+        except Exception:
+            pass
+    return _ice_prefetch_running
+
+
+def _ice_cache_path(cache_key: str) -> Path:
+    return _ICE_CACHE_DIR / f"{cache_key}.json"
+
+
+def _ice_cache_get(cache_key: str) -> dict | None:
+    p = _ice_cache_path(cache_key)
+    if p.exists():
+        try:
+            import json as _json
+            return _json.loads(p.read_text())
+        except Exception:
+            return None
+    return None
+
+
+def _ice_cache_put(cache_key: str, data: dict):
+    import json as _json
+    p = _ice_cache_path(cache_key)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(_json.dumps(data))
+    tmp.rename(p)
+
+
+def _rebuild_ice_cache_from_db(cache_key, lat_min, lat_max, lon_min, lon_max):
+    """Rebuild ice forecast file cache from PostgreSQL data."""
+    if db_weather is None:
+        return None
+
+    run_time, hours = db_weather.get_available_hours_by_source("cmems_ice")
+    if not hours:
+        return None
+
+    logger.info(f"Rebuilding ice cache from DB: {len(hours)} hours")
+
+    grids = db_weather.get_grids_for_timeline(
+        "cmems_ice", ["ice_siconc"],
+        lat_min, lat_max, lon_min, lon_max, hours
+    )
+
+    if not grids or "ice_siconc" not in grids or not grids["ice_siconc"]:
+        return None
+
+    first_fh = min(grids["ice_siconc"].keys())
+    lats_full, lons_full, _ = grids["ice_siconc"][first_fh]
+    max_dim = max(len(lats_full), len(lons_full))
+    STEP = max(1, round(max_dim / 250))
+    shared_lats = lats_full[::STEP].tolist()
+    shared_lons = lons_full[::STEP].tolist()
+
+    mask_lats_arr, mask_lons_arr, ocean_mask_arr = _build_ocean_mask(
+        lat_min, lat_max, lon_min, lon_max
+    )
+
+    frames = {}
+    for fh in sorted(hours):
+        if fh in grids["ice_siconc"]:
+            _, _, d = grids["ice_siconc"][fh]
+            frames[str(fh)] = {
+                "data": np.round(d[::STEP, ::STEP], 4).tolist(),
+            }
+
+    cache_data = {
+        "run_time": run_time.isoformat() if run_time else "",
+        "total_hours": 10,
+        "cached_hours": len(frames),
+        "source": "cmems",
+        "lats": shared_lats,
+        "lons": shared_lons,
+        "ny": len(shared_lats),
+        "nx": len(shared_lons),
+        "ocean_mask": ocean_mask_arr,
+        "ocean_mask_lats": mask_lats_arr,
+        "ocean_mask_lons": mask_lons_arr,
+        "frames": frames,
+    }
+
+    _ice_cache_put(cache_key, cache_data)
+    logger.info(f"Ice cache rebuilt from DB: {len(frames)} frames")
+    return cache_data
+
+
+@app.get("/api/weather/forecast/ice/status")
+async def api_get_ice_forecast_status(
+    lat_min: float = Query(30.0),
+    lat_max: float = Query(60.0),
+    lon_min: float = Query(-15.0),
+    lon_max: float = Query(40.0),
+):
+    """Get ice forecast prefetch status."""
+    cache_key = f"ice_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
+    cached = _ice_cache_get(cache_key)
+    total_hours = 10
+
+    prefetch_running = _is_ice_prefetch_running()
+
+    if cached:
+        cached_hours = len(cached.get("frames", {}))
+        return {
+            "total_hours": total_hours,
+            "cached_hours": cached_hours,
+            "complete": cached_hours >= total_hours,
+            "prefetch_running": prefetch_running,
+        }
+
+    return {
+        "total_hours": total_hours,
+        "cached_hours": 0,
+        "complete": False,
+        "prefetch_running": prefetch_running,
+    }
+
+
+@app.post("/api/weather/forecast/ice/prefetch")
+async def api_trigger_ice_forecast_prefetch(
+    background_tasks: BackgroundTasks,
+    lat_min: float = Query(30.0),
+    lat_max: float = Query(60.0),
+    lon_min: float = Query(-15.0),
+    lon_max: float = Query(40.0),
+):
+    """Trigger background download of CMEMS ice forecast (10-day daily)."""
+    global _ice_prefetch_running
+
+    if _is_ice_prefetch_running():
+        return {"status": "already_running", "message": "Ice prefetch is already in progress"}
+
+    lock = _get_ice_prefetch_lock()
+    if not lock.acquire(blocking=False):
+        return {"status": "already_running", "message": "Ice prefetch is already in progress"}
+    lock.release()
+
+    def _do_ice_prefetch():
+        global _ice_prefetch_running
+        pflock = _get_ice_prefetch_lock()
+        if not pflock.acquire(blocking=False):
+            return
+
+        r = _get_redis()
+        try:
+            if r is not None:
+                acquired = r.set(_REDIS_ICE_PREFETCH_LOCK, "1", nx=True, ex=1200)
+                if not acquired:
+                    pflock.release()
+                    return
+                r.setex(_REDIS_ICE_PREFETCH_STATUS, 1200, "1")
+
+            _ice_prefetch_running = True
+
+            cache_key_chk = f"ice_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
+            existing = _ice_cache_get(cache_key_chk)
+            if existing and len(existing.get("frames", {})) >= 10 and _cache_covers_bounds(existing, lat_min, lat_max, lon_min, lon_max):
+                logger.info("Ice forecast file cache already complete, skipping CMEMS download")
+                return
+
+            # Try to rebuild from DB before downloading from CMEMS
+            if db_weather is not None:
+                rebuilt = _rebuild_ice_cache_from_db(cache_key_chk, lat_min, lat_max, lon_min, lon_max)
+                if rebuilt and len(rebuilt.get("frames", {})) >= 10 and _cache_covers_bounds(rebuilt, lat_min, lat_max, lon_min, lon_max):
+                    logger.info("Ice forecast rebuilt from DB, skipping CMEMS download")
+                    return
+
+            # Remove stale file cache
+            stale_path = _ice_cache_path(cache_key_chk)
+            if stale_path.exists():
+                stale_path.unlink(missing_ok=True)
+                logger.info(f"Removed stale ice cache: {cache_key_chk}")
+
+            logger.info("CMEMS ice forecast prefetch started")
+
+            result = copernicus_provider.fetch_ice_forecast(lat_min, lat_max, lon_min, lon_max)
+            if result is None:
+                # Fallback to synthetic
+                logger.info("CMEMS ice forecast unavailable, generating synthetic")
+                result = synthetic_provider.generate_ice_forecast(lat_min, lat_max, lon_min, lon_max)
+
+            if not result:
+                logger.error("Ice forecast fetch returned empty")
+                return
+
+            first_wd = next(iter(result.values()))
+            max_dim = max(len(first_wd.lats), len(first_wd.lons))
+            STEP = max(1, round(max_dim / 250))
+            logger.info(f"Ice forecast: grid {len(first_wd.lats)}x{len(first_wd.lons)}, STEP={STEP}")
+            sub_lats = first_wd.lats[::STEP]
+            sub_lons = first_wd.lons[::STEP]
+
+            mask_lats_arr, mask_lons_arr, ocean_mask_arr = _build_ocean_mask(
+                lat_min, lat_max, lon_min, lon_max
+            )
+
+            frames = {}
+            for fh, wd in sorted(result.items()):
+                siconc = wd.ice_concentration if wd.ice_concentration is not None else wd.values
+                if siconc is not None:
+                    frames[str(fh)] = {
+                        "data": np.round(siconc[::STEP, ::STEP], 4).tolist(),
+                    }
+
+            cache_key = f"ice_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
+            _ice_cache_put(cache_key, {
+                "run_time": first_wd.time.isoformat() if first_wd.time else "",
+                "total_hours": 10,
+                "cached_hours": len(frames),
+                "source": "cmems",
+                "lats": sub_lats.tolist() if hasattr(sub_lats, 'tolist') else list(sub_lats),
+                "lons": sub_lons.tolist() if hasattr(sub_lons, 'tolist') else list(sub_lons),
+                "ny": len(sub_lats),
+                "nx": len(sub_lons),
+                "ocean_mask": ocean_mask_arr,
+                "ocean_mask_lats": mask_lats_arr,
+                "ocean_mask_lons": mask_lons_arr,
+                "frames": frames,
+            })
+            logger.info(f"Ice forecast cached: {len(frames)} frames")
+
+            # Store in PostgreSQL for persistence
+            if weather_ingestion is not None:
+                try:
+                    logger.info("Ingesting ice forecast frames into PostgreSQL...")
+                    weather_ingestion.ingest_ice_forecast_frames(result)
+                except Exception as db_e:
+                    logger.error(f"Ice forecast DB ingestion failed: {db_e}")
+
+        except Exception as e:
+            logger.error(f"Ice forecast prefetch failed: {e}")
+        finally:
+            _ice_prefetch_running = False
+            if r is not None:
+                try:
+                    r.delete(_REDIS_ICE_PREFETCH_LOCK, _REDIS_ICE_PREFETCH_STATUS)
+                except Exception:
+                    pass
+            pflock.release()
+
+    background_tasks.add_task(_do_ice_prefetch)
+    return {"status": "started", "message": "Ice forecast prefetch triggered in background"}
+
+
+@app.get("/api/weather/forecast/ice/frames")
+async def api_get_ice_forecast_frames(
+    lat_min: float = Query(30.0),
+    lat_max: float = Query(60.0),
+    lon_min: float = Query(-15.0),
+    lon_max: float = Query(40.0),
+):
+    """Return all cached CMEMS ice forecast frames."""
+    cache_key = f"ice_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
+    cached = _ice_cache_get(cache_key)
+
+    # Fallback: rebuild from PostgreSQL
+    if not cached:
+        cached = await asyncio.to_thread(
+            _rebuild_ice_cache_from_db, cache_key, lat_min, lat_max, lon_min, lon_max
+        )
+
+    if not cached:
+        return {
+            "run_time": "",
+            "total_hours": 10,
             "cached_hours": 0,
             "source": "none",
             "lats": [],

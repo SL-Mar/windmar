@@ -174,6 +174,25 @@ export interface CurrentForecastFrames {
   frames: Record<string, CurrentForecastFrame>;
 }
 
+export interface IceForecastFrame {
+  data: number[][];
+}
+
+export interface IceForecastFrames {
+  run_time: string;
+  total_hours: number;
+  cached_hours: number;
+  source?: string;
+  lats: number[];
+  lons: number[];
+  ny: number;
+  nx: number;
+  ocean_mask?: boolean[][];
+  ocean_mask_lats?: number[];
+  ocean_mask_lons?: number[];
+  frames: Record<string, IceForecastFrame>;
+}
+
 export interface VelocityData {
   header: {
     parameterCategory: number;
@@ -904,6 +923,37 @@ export const apiClient = {
     lon_max?: number;
   } = {}): Promise<CurrentForecastFrames> {
     const response = await api.get<CurrentForecastFrames>('/api/weather/forecast/current/frames', { params });
+    return response.data;
+  },
+
+  // Ice forecast
+  async getIceForecastStatus(params: {
+    lat_min?: number;
+    lat_max?: number;
+    lon_min?: number;
+    lon_max?: number;
+  } = {}): Promise<ForecastStatus> {
+    const response = await api.get<ForecastStatus>('/api/weather/forecast/ice/status', { params });
+    return response.data;
+  },
+
+  async triggerIceForecastPrefetch(params: {
+    lat_min?: number;
+    lat_max?: number;
+    lon_min?: number;
+    lon_max?: number;
+  } = {}): Promise<{ status: string; message: string }> {
+    const response = await api.post('/api/weather/forecast/ice/prefetch', null, { params });
+    return response.data;
+  },
+
+  async getIceForecastFrames(params: {
+    lat_min?: number;
+    lat_max?: number;
+    lon_min?: number;
+    lon_max?: number;
+  } = {}): Promise<IceForecastFrames> {
+    const response = await api.get<IceForecastFrames>('/api/weather/forecast/ice/frames', { params });
     return response.data;
   },
 

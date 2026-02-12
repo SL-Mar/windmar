@@ -2,10 +2,10 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Play, Pause, X, Clock, Loader2, Info } from 'lucide-react';
-import { apiClient, VelocityData, ForecastFrames, WaveForecastFrames, WaveForecastFrame, CurrentForecastFrames } from '@/lib/api';
+import { apiClient, VelocityData, ForecastFrames, WaveForecastFrames, WaveForecastFrame, CurrentForecastFrames, IceForecastFrames } from '@/lib/api';
 import { debugLog } from '@/lib/debugLog';
 
-type LayerType = 'wind' | 'waves' | 'currents';
+type LayerType = 'wind' | 'waves' | 'currents' | 'ice';
 
 export interface ViewportBounds {
   lat_min: number;
@@ -22,12 +22,15 @@ interface ForecastTimelineProps {
   onWaveForecastHourChange?: (hour: number, frame: WaveForecastFrames | null) => void;
   /** Callback for current forecast frame changes */
   onCurrentForecastHourChange?: (hour: number, frame: CurrentForecastFrames | null) => void;
+  /** Callback for ice forecast frame changes */
+  onIceForecastHourChange?: (hour: number, frame: IceForecastFrames | null) => void;
   layerType?: LayerType;
   viewportBounds?: ViewportBounds | null;
   dataTimestamp?: string | null;
 }
 
 const FORECAST_HOURS = Array.from({ length: 41 }, (_, i) => i * 3); // 0,3,6,...,120
+const ICE_FORECAST_HOURS = Array.from({ length: 10 }, (_, i) => i * 24); // 0,24,48,...,216
 const SPEED_OPTIONS = [1, 2, 4];
 const SPEED_INTERVAL: Record<number, number> = { 1: 2000, 2: 1000, 4: 500 };
 
@@ -37,6 +40,7 @@ export default function ForecastTimeline({
   onForecastHourChange,
   onWaveForecastHourChange,
   onCurrentForecastHourChange,
+  onIceForecastHourChange,
   layerType = 'wind',
   viewportBounds,
   dataTimestamp,
@@ -44,7 +48,9 @@ export default function ForecastTimeline({
   const isWindMode = layerType === 'wind';
   const isWaveMode = layerType === 'waves';
   const isCurrentMode = layerType === 'currents';
-  const hasForecast = isWindMode || isWaveMode || isCurrentMode;
+  const isIceMode = layerType === 'ice';
+  const hasForecast = isWindMode || isWaveMode || isCurrentMode || isIceMode;
+  const activeHours = isIceMode ? ICE_FORECAST_HOURS : FORECAST_HOURS;
 
   const [currentHour, setCurrentHour] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -66,6 +72,10 @@ export default function ForecastTimeline({
   const [currentFrameData, setCurrentFrameData] = useState<CurrentForecastFrames | null>(null);
   const currentFrameDataRef = useRef<CurrentForecastFrames | null>(null);
 
+  // Ice frames
+  const [iceFrameData, setIceFrameData] = useState<IceForecastFrames | null>(null);
+  const iceFrameDataRef = useRef<IceForecastFrames | null>(null);
+
   const playIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -80,6 +90,7 @@ export default function ForecastTimeline({
   useEffect(() => { windFramesRef.current = windFrames; }, [windFrames]);
   useEffect(() => { waveFrameDataRef.current = waveFrameData; }, [waveFrameData]);
   useEffect(() => { currentFrameDataRef.current = currentFrameData; }, [currentFrameData]);
+  useEffect(() => { iceFrameDataRef.current = iceFrameData; }, [iceFrameData]);
 
   // ------------------------------------------------------------------
   // Wind forecast: load all frames
@@ -294,15 +305,89 @@ export default function ForecastTimeline({
   }, [visible, isCurrentMode, hasBounds, loadCurrentFrames]);
 
   // ------------------------------------------------------------------
+  // Ice forecast: load all frames
+  // ------------------------------------------------------------------
+  const loadIceFrames = useCallback(async () => {
+    try {
+      debugLog('info', 'ICE', 'Loading ice forecast frames from API...');
+      const t0 = performance.now();
+      const bp = boundsRef.current ?? {};
+      const data: IceForecastFrames = await apiClient.getIceForecastFrames(bp);
+      const dt = ((performance.now() - t0) / 1000).toFixed(1);
+      const frameKeys = Object.keys(data.frames);
+      debugLog('info', 'ICE', `Loaded ${frameKeys.length} frames in ${dt}s, grid=${data.ny}x${data.nx}`);
+      setIceFrameData(data);
+      if (data.run_time) {
+        try {
+          const d = new Date(data.run_time);
+          setRunTime(
+            `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')} ${String(d.getUTCHours()).padStart(2, '0')}Z`
+          );
+        } catch {
+          setRunTime(data.run_time);
+        }
+      }
+      setPrefetchComplete(true);
+      setIsLoading(false);
+      if (data.frames['0'] && onIceForecastHourChange) {
+        debugLog('info', 'ICE', 'Setting initial ice frame T+0h');
+        onIceForecastHourChange(0, data);
+      }
+    } catch (e) {
+      debugLog('error', 'ICE', `Failed to load ice forecast frames: ${e}`);
+      setIsLoading(false);
+    }
+  }, [onIceForecastHourChange]);
+
+  // ------------------------------------------------------------------
+  // Ice prefetch effect
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    if (!visible || !isIceMode || !boundsRef.current) return;
+
+    let cancelled = false;
+    const bp = boundsRef.current;
+
+    const start = async () => {
+      setIsLoading(true);
+      setPrefetchComplete(false);
+      debugLog('info', 'ICE', 'Triggering ice forecast prefetch...');
+      try {
+        await apiClient.triggerIceForecastPrefetch(bp);
+        const poll = async () => {
+          if (cancelled) return;
+          try {
+            const st = await apiClient.getIceForecastStatus(bp);
+            setLoadProgress({ cached: st.cached_hours, total: st.total_hours });
+            if (st.complete || st.cached_hours === st.total_hours) {
+              if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
+              await loadIceFrames();
+            }
+          } catch (e) { debugLog('error', 'ICE', `Ice forecast poll failed: ${e}`); }
+        };
+        await poll();
+        pollIntervalRef.current = setInterval(poll, 5000);
+      } catch (e) {
+        debugLog('error', 'ICE', `Ice forecast prefetch trigger failed: ${e}`);
+        setIsLoading(false);
+      }
+    };
+
+    start();
+    return () => { cancelled = true; if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; } };
+  }, [visible, isIceMode, hasBounds, loadIceFrames]);
+
+  // ------------------------------------------------------------------
   // Play/pause
   // ------------------------------------------------------------------
   useEffect(() => {
     if (isPlaying && prefetchComplete && hasForecast) {
       playIntervalRef.current = setInterval(() => {
         setCurrentHour((prev) => {
-          const idx = FORECAST_HOURS.indexOf(prev);
-          const nextIdx = (idx + 1) % FORECAST_HOURS.length;
-          const nextHour = FORECAST_HOURS[nextIdx];
+          const hrs = isIceMode ? ICE_FORECAST_HOURS : FORECAST_HOURS;
+          const idx = hrs.indexOf(prev);
+          const nextIdx = (idx + 1) % hrs.length;
+          const nextHour = hrs[nextIdx];
 
           if (isWindMode) {
             const fd = windFramesRef.current[String(nextHour)] || null;
@@ -311,13 +396,15 @@ export default function ForecastTimeline({
             onWaveForecastHourChange(nextHour, waveFrameDataRef.current);
           } else if (isCurrentMode && onCurrentForecastHourChange && currentFrameDataRef.current) {
             onCurrentForecastHourChange(nextHour, currentFrameDataRef.current);
+          } else if (isIceMode && onIceForecastHourChange && iceFrameDataRef.current) {
+            onIceForecastHourChange(nextHour, iceFrameDataRef.current);
           }
           return nextHour;
         });
       }, SPEED_INTERVAL[speed]);
     }
     return () => { if (playIntervalRef.current) { clearInterval(playIntervalRef.current); playIntervalRef.current = null; } };
-  }, [isPlaying, speed, prefetchComplete, hasForecast, isWindMode, isWaveMode, isCurrentMode, onForecastHourChange, onWaveForecastHourChange, onCurrentForecastHourChange]);
+  }, [isPlaying, speed, prefetchComplete, hasForecast, isWindMode, isWaveMode, isCurrentMode, isIceMode, onForecastHourChange, onWaveForecastHourChange, onCurrentForecastHourChange, onIceForecastHourChange]);
 
   // Slider change
   const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -329,6 +416,8 @@ export default function ForecastTimeline({
       onWaveForecastHourChange(hour, waveFrameData);
     } else if (isCurrentMode && onCurrentForecastHourChange && currentFrameData) {
       onCurrentForecastHourChange(hour, currentFrameData);
+    } else if (isIceMode && onIceForecastHourChange && iceFrameData) {
+      onIceForecastHourChange(hour, iceFrameData);
     }
   };
 
@@ -339,6 +428,7 @@ export default function ForecastTimeline({
     onForecastHourChange(0, null);
     if (onWaveForecastHourChange) onWaveForecastHourChange(0, null);
     if (onCurrentForecastHourChange) onCurrentForecastHourChange(0, null);
+    if (onIceForecastHourChange) onIceForecastHourChange(0, null);
     onClose();
   };
 
@@ -406,14 +496,15 @@ export default function ForecastTimeline({
     );
   }
 
-  // Wind / Waves / Currents: full scrubber
-  const layerLabel = isWindMode ? 'Wind' : isWaveMode ? 'Waves' : 'Currents';
+  // Wind / Waves / Currents / Ice: full scrubber
+  const layerLabel = isWindMode ? 'Wind' : isWaveMode ? 'Waves' : isCurrentMode ? 'Currents' : 'Ice';
 
   // Color-code: green when forecast data loaded, gray when not
   const sourceColor = (() => {
     if (isWindMode && Object.keys(windFrames).length > 0) return 'text-green-400';
     if (isWaveMode && waveFrameData) return 'text-green-400';
     if (isCurrentMode && currentFrameData) return 'text-green-400';
+    if (isIceMode && iceFrameData) return 'text-green-400';
     return 'text-gray-500';
   })();
   const hasData = sourceColor === 'text-green-400';
@@ -449,7 +540,7 @@ export default function ForecastTimeline({
         <div className="flex-shrink-0 min-w-[170px]">
           <div className="flex items-center gap-1.5 text-white text-sm font-medium">
             <Clock className="w-3.5 h-3.5 text-primary-400" />
-            <span>{layerLabel} T+{currentHour}h</span>
+            <span>{layerLabel} {isIceMode ? `Day ${currentHour / 24}` : `T+${currentHour}h`}</span>
             <span className="text-gray-400 text-xs">|</span>
             <span className="text-gray-300 text-xs">{formatValidTime(currentHour)}</span>
           </div>
@@ -465,8 +556,8 @@ export default function ForecastTimeline({
           <input
             type="range"
             min={0}
-            max={120}
-            step={3}
+            max={isIceMode ? 216 : 120}
+            step={isIceMode ? 24 : 3}
             value={currentHour}
             onChange={handleSliderChange}
             disabled={!prefetchComplete}
@@ -475,7 +566,10 @@ export default function ForecastTimeline({
               [&::-moz-range-thumb]:w-4 [&::-moz-range-thumb]:h-4 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:bg-primary-400 [&::-moz-range-thumb]:border-0`}
           />
           <div className="flex justify-between mt-1 text-[10px]">
-            {['0h','24h','48h','72h','96h','120h'].map(label => (
+            {(isIceMode
+              ? ['Day 0','Day 1','Day 2','Day 3','Day 4','Day 5','Day 6','Day 7','Day 8','Day 9']
+              : ['0h','24h','48h','72h','96h','120h']
+            ).map(label => (
               <span key={label} className={sourceColor}>{label}</span>
             ))}
           </div>

@@ -204,7 +204,7 @@ function WeatherGridLayerInner({
   useEffect(() => {
     const currentMode = mode;
     const currentShowArrows = showArrows;
-    const DS = 64; // render at 64x64, upscale to 256x256
+    const DS = 128; // render at 128x128, upscale to 256x256
 
     const WeatherTileLayer = L.GridLayer.extend({
       createTile(coords: any) {

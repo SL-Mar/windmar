@@ -933,6 +933,8 @@ class CopernicusDataProvider:
     # Sea Ice Concentration from CMEMS
     # ------------------------------------------------------------------
     CMEMS_ICE_DATASET = "cmems_mod_glo_phy_anfc_0.083deg_P1D-m"
+    ICE_FORECAST_DAYS = 10
+    ICE_FORECAST_HOURS = list(range(0, 217, 24))  # 0-216h every 24h = 10 steps
 
     def fetch_ice_data(
         self,
@@ -1028,6 +1030,134 @@ class CopernicusDataProvider:
             )
         except Exception as e:
             logger.error(f"Failed to parse ice data: {e}")
+            return None
+
+    def fetch_ice_forecast(
+        self,
+        lat_min: float,
+        lat_max: float,
+        lon_min: float,
+        lon_max: float,
+    ) -> Optional[Dict[int, "WeatherData"]]:
+        """
+        Fetch 10-day daily ice concentration forecast from CMEMS.
+
+        Returns:
+            Dict mapping forecast_hour → WeatherData (0, 24, 48, ..., 216),
+            or None on failure.
+        """
+        if not self._has_copernicusmarine or not self._has_xarray:
+            logger.warning("CMEMS API not available for ice forecast")
+            return None
+
+        if not self.cmems_username or not self.cmems_password:
+            logger.warning("CMEMS credentials not configured for ice forecast")
+            return None
+
+        # Only fetch if region includes high latitudes (>55° or <-55°)
+        if abs(lat_max) < 55 and abs(lat_min) < 55:
+            logger.info("Region below 55° latitude — skipping ice forecast")
+            return None
+
+        import copernicusmarine
+        import xarray as xr
+
+        logger.info(f"Ice forecast bbox: lat[{lat_min:.1f},{lat_max:.1f}] lon[{lon_min:.1f},{lon_max:.1f}]")
+
+        now = datetime.utcnow()
+        start_dt = now - timedelta(hours=1)
+        end_dt = now + timedelta(days=self.ICE_FORECAST_DAYS + 1)
+
+        cache_key = now.strftime("%Y%m%d")
+        cache_file = (
+            self.cache_dir
+            / f"ice_forecast_{cache_key}_lat{lat_min:.0f}_{lat_max:.0f}_lon{lon_min:.0f}_{lon_max:.0f}.nc"
+        )
+
+        try:
+            if cache_file.exists():
+                logger.info(f"Loading ice forecast from cache: {cache_file}")
+                try:
+                    ds = xr.open_dataset(cache_file)
+                except Exception as e:
+                    logger.warning(f"Corrupted ice forecast cache, deleting and re-downloading: {e}")
+                    cache_file.unlink(missing_ok=True)
+                    ds = None
+            else:
+                ds = None
+
+            if ds is None:
+                logger.info(f"Downloading CMEMS ice forecast {start_dt} → {end_dt}")
+                ds = copernicusmarine.open_dataset(
+                    dataset_id=self.CMEMS_ICE_DATASET,
+                    variables=["siconc"],
+                    minimum_longitude=lon_min,
+                    maximum_longitude=lon_max,
+                    minimum_latitude=lat_min,
+                    maximum_latitude=lat_max,
+                    start_datetime=start_dt.strftime("%Y-%m-%dT%H:%M:%S"),
+                    end_datetime=end_dt.strftime("%Y-%m-%dT%H:%M:%S"),
+                    username=self.cmems_username,
+                    password=self.cmems_password,
+                )
+                if ds is None:
+                    logger.error("CMEMS returned None for ice forecast")
+                    return None
+                logger.info("Loading ice forecast data into memory...")
+                ds = ds.load()
+                ds.to_netcdf(cache_file)
+                ds.close()
+                logger.info(f"Ice forecast cached: {cache_file}")
+                fsize = cache_file.stat().st_size
+                if fsize < 100_000:
+                    logger.warning(f"Ice forecast cache suspiciously small ({fsize} bytes), deleting")
+                    cache_file.unlink(missing_ok=True)
+                    return None
+                ds = xr.open_dataset(cache_file)
+
+            lats = ds["latitude"].values
+            lons = ds["longitude"].values
+            times = ds["time"].values
+
+            import pandas as pd
+
+            base_time = pd.Timestamp(times[0]).to_pydatetime()
+            frames: Dict[int, WeatherData] = {}
+
+            for t_idx in range(len(times)):
+                ts = pd.Timestamp(times[t_idx]).to_pydatetime()
+                delta_hours = round((ts - base_time).total_seconds() / 3600)
+                # Only keep daily steps (multiples of 24) within 0-216h
+                fh = round(delta_hours / 24) * 24
+                if fh < 0 or fh > 216 or fh in frames:
+                    continue
+
+                siconc = ds["siconc"].values
+                if len(siconc.shape) == 3 and t_idx < siconc.shape[0]:
+                    siconc_2d = siconc[t_idx]
+                elif len(siconc.shape) == 2:
+                    siconc_2d = siconc
+                else:
+                    continue
+
+                siconc_2d = np.nan_to_num(siconc_2d, nan=0.0)
+                siconc_2d = np.clip(siconc_2d, 0.0, 1.0)
+
+                frames[fh] = WeatherData(
+                    parameter="ice_concentration",
+                    time=ts,
+                    lats=lats,
+                    lons=lons,
+                    values=siconc_2d,
+                    unit="fraction",
+                    ice_concentration=siconc_2d,
+                )
+
+            logger.info(f"Ice forecast: {len(frames)} frames extracted (hours: {sorted(frames.keys())})")
+            return frames if frames else None
+
+        except Exception as e:
+            logger.error(f"Failed to fetch ice forecast: {e}")
             return None
 
     def get_weather_at_point(
@@ -1408,6 +1538,54 @@ class SyntheticDataProvider:
             unit="fraction",
             ice_concentration=ice,
         )
+
+    def generate_ice_forecast(
+        self,
+        lat_min: float,
+        lat_max: float,
+        lon_min: float,
+        lon_max: float,
+        resolution: float = 1.0,
+    ) -> Dict[int, WeatherData]:
+        """Generate 10-day synthetic ice forecast with daily variation."""
+        frames: Dict[int, WeatherData] = {}
+        base_time = datetime.utcnow()
+
+        for day in range(10):
+            fh = day * 24
+            time = base_time + timedelta(hours=fh)
+            # Slight daily variation: ice edge shifts poleward over forecast period
+            lat_shift = day * 0.2  # Ice retreats ~0.2° per day in forecast
+
+            lats = np.arange(lat_min, lat_max + resolution, resolution)
+            lons = np.arange(lon_min, lon_max + resolution, resolution)
+            lon_grid, lat_grid = np.meshgrid(lons, lats)
+
+            month = time.month
+            nh_seasonal = 1.0 if month in [12, 1, 2, 3] else 0.5 if month in [4, 11] else 0.2
+            sh_seasonal = 1.0 if month in [6, 7, 8, 9] else 0.5 if month in [5, 10] else 0.2
+
+            ice = np.zeros_like(lat_grid)
+            nh_mask = lat_grid > (65 + lat_shift)
+            ice[nh_mask] = np.clip((lat_grid[nh_mask] - 65 - lat_shift) / 15 * nh_seasonal, 0, 1)
+            sh_mask = lat_grid < (-60 - lat_shift)
+            ice[sh_mask] = np.clip((-lat_grid[sh_mask] - 60 - lat_shift) / 15 * sh_seasonal, 0, 1)
+
+            # Add random noise for daily variation
+            ice += np.random.randn(*ice.shape) * 0.02
+            ice = np.clip(ice, 0.0, 1.0)
+
+            frames[fh] = WeatherData(
+                parameter="ice_concentration",
+                time=time,
+                lats=lats,
+                lons=lons,
+                values=ice,
+                unit="fraction",
+                ice_concentration=ice,
+            )
+
+        return frames
 
     def generate_current_field(
         self,
