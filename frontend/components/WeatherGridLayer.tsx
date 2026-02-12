@@ -149,11 +149,15 @@ function WeatherGridLayerInner({
         const waveValues = currentMode === 'waves' && currentWaveData ? (currentWaveData as WaveFieldData).data : null;
         const waveDir = currentMode === 'waves' && currentWaveData ? (currentWaveData as WaveFieldData).direction : null;
 
-        // Compute lat/lon ranges
-        const latMin = lats[0];
-        const latMax = lats[ny - 1];
-        const lonMin = lons[0];
-        const lonMax = lons[nx - 1];
+        // Compute lat/lon ranges (handle both ascending and descending order)
+        const latStart = lats[0];
+        const latEnd = lats[ny - 1];
+        const latMin = Math.min(latStart, latEnd);
+        const latMax = Math.max(latStart, latEnd);
+        const lonStart = lons[0];
+        const lonEnd = lons[nx - 1];
+        const lonMin = Math.min(lonStart, lonEnd);
+        const lonMax = Math.max(lonStart, lonEnd);
 
         // Create offscreen canvas at downsampled resolution
         const offscreen = document.createElement('canvas');
@@ -201,9 +205,9 @@ function WeatherGridLayerInner({
               1,
             );
 
-            // Find grid indices (fractional)
-            const latFracIdx = ((lat - latMin) / (latMax - latMin)) * (ny - 1);
-            const lonFracIdx = ((lng - lonMin) / (lonMax - lonMin)) * (nx - 1);
+            // Find grid indices (fractional) — use original array ordering
+            const latFracIdx = ((lat - latStart) / (latEnd - latStart)) * (ny - 1);
+            const lonFracIdx = ((lng - lonStart) / (lonEnd - lonStart)) * (nx - 1);
             const latIdx = Math.floor(latFracIdx);
             const lonIdx = Math.floor(lonFracIdx);
             const latFrac = latFracIdx - latIdx;
@@ -271,8 +275,8 @@ function WeatherGridLayerInner({
 
               if (aLat < latMin || aLat > latMax || lng < lonMin || lng > lonMax) continue;
 
-              const latFracIdx = ((aLat - latMin) / (latMax - latMin)) * (ny - 1);
-              const lonFracIdx = ((lng - lonMin) / (lonMax - lonMin)) * (nx - 1);
+              const latFracIdx = ((aLat - latStart) / (latEnd - latStart)) * (ny - 1);
+              const lonFracIdx = ((lng - lonStart) / (lonEnd - lonStart)) * (nx - 1);
               const aLatIdx = Math.floor(latFracIdx);
               const aLonIdx = Math.floor(lonFracIdx);
               const aLatFrac = latFracIdx - aLatIdx;
@@ -280,8 +284,8 @@ function WeatherGridLayerInner({
 
               // Skip land (nearest-neighbor on high-res mask)
               if (oceanMask) {
-                const mLatIdx = Math.round(((aLat - maskLatMin) / (maskLatMax - maskLatMin)) * (maskNy - 1));
-                const mLonIdx = Math.round(((lng - maskLonMin) / (maskLonMax - maskLonMin)) * (maskNx - 1));
+                const mLatIdx = Math.round(((aLat - maskLats[0]) / (maskLats[maskNy - 1] - maskLats[0])) * (maskNy - 1));
+                const mLonIdx = Math.round(((lng - maskLons[0]) / (maskLons[maskNx - 1] - maskLons[0])) * (maskNx - 1));
                 if (mLatIdx < 0 || mLatIdx >= maskNy || mLonIdx < 0 || mLonIdx >= maskNx || !oceanMask[mLatIdx]?.[mLonIdx]) continue;
               }
 
@@ -389,8 +393,8 @@ function WeatherGridLayerInner({
               const aLat = (latRad * 180) / Math.PI;
               if (aLat < latMin || aLat > latMax || lng < lonMin || lng > lonMax) continue;
 
-              const latFracIdx = ((aLat - latMin) / (latMax - latMin)) * (ny - 1);
-              const lonFracIdx = ((lng - lonMin) / (lonMax - lonMin)) * (nx - 1);
+              const latFracIdx = ((aLat - latStart) / (latEnd - latStart)) * (ny - 1);
+              const lonFracIdx = ((lng - lonStart) / (lonEnd - lonStart)) * (nx - 1);
               const aLatIdx = Math.floor(latFracIdx);
               const aLonIdx = Math.floor(lonFracIdx);
               const aLatFrac = latFracIdx - aLatIdx;
@@ -398,8 +402,8 @@ function WeatherGridLayerInner({
 
               // Skip land
               if (oceanMask) {
-                const mLatIdx = Math.round(((aLat - maskLatMin) / (maskLatMax - maskLatMin)) * (maskNy - 1));
-                const mLonIdx = Math.round(((lng - maskLonMin) / (maskLonMax - maskLonMin)) * (maskNx - 1));
+                const mLatIdx = Math.round(((aLat - maskLats[0]) / (maskLats[maskNy - 1] - maskLats[0])) * (maskNy - 1));
+                const mLonIdx = Math.round(((lng - maskLons[0]) / (maskLons[maskNx - 1] - maskLons[0])) * (maskNx - 1));
                 if (mLatIdx < 0 || mLatIdx >= maskNy || mLonIdx < 0 || mLonIdx >= maskNx || !oceanMask[mLatIdx]?.[mLonIdx]) continue;
               }
 
