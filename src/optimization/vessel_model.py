@@ -456,22 +456,24 @@ class VesselModel:
         Returns:
             Optimal speed in knots
         """
-        # Test speeds around service speed
+        # Find speed at optimal engine efficiency (minimum SFOC).
+        # The SFOC curve has its optimum at ~75-85% MCR load; the speed
+        # that produces that load is the most fuel-efficient operating point.
         service_speed = (
             self.specs.service_speed_laden if is_laden
             else self.specs.service_speed_ballast
         )
 
         speeds = np.linspace(service_speed - 3, service_speed + 2, 20)
-        fuel_rates = []
+        sfoc_values = []
 
         for speed in speeds:
             result = self.calculate_fuel_consumption(
                 speed, is_laden, weather, distance_nm=1.0
             )
-            fuel_per_nm = result["fuel_mt"] / 1.0
-            fuel_rates.append(fuel_per_nm)
+            load = result["power_kw"] / self.specs.mcr_kw
+            sfoc_values.append(self._sfoc_curve(load))
 
-        # Find minimum fuel per mile
-        optimal_idx = np.argmin(fuel_rates)
+        # Find speed at minimum SFOC (best engine efficiency)
+        optimal_idx = int(np.argmin(sfoc_values))
         return float(speeds[optimal_idx])

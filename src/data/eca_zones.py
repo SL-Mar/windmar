@@ -195,14 +195,16 @@ NORTH_AMERICAN_PACIFIC_ECA = ECAZone(
     color="#ff6b6b",
     nox_tier=3,
     polygon=[
-        # Pacific coast simplified
+        # Pacific coast simplified (vertices must include Seattle/Puget Sound)
         (55.0, -130.0),  # British Columbia
-        (50.0, -126.0),  # Vancouver
-        (48.0, -124.0),  # Washington
+        (50.0, -126.0),  # Vancouver Island
+        (48.5, -122.0),  # Puget Sound north
+        (47.0, -122.0),  # Puget Sound south / Seattle
+        (46.0, -124.0),  # Washington coast
         (45.0, -124.0),  # Oregon
         (42.0, -124.0),  # California north
-        (38.0, -122.0),  # San Francisco
-        (34.0, -119.0),  # Los Angeles
+        (38.0, -123.0),  # San Francisco
+        (34.0, -118.0),  # Los Angeles
         (32.5, -117.0),  # San Diego
         # 200nm offshore boundary
         (32.0, -121.0),
