@@ -29,10 +29,17 @@ interface ForecastTimelineProps {
   dataTimestamp?: string | null;
 }
 
-const FORECAST_HOURS = Array.from({ length: 41 }, (_, i) => i * 3); // 0,3,6,...,120
-const ICE_FORECAST_HOURS = Array.from({ length: 10 }, (_, i) => i * 24); // 0,24,48,...,216
+// Default forecast hours (used until actual frame data arrives from DB)
+const DEFAULT_FORECAST_HOURS = Array.from({ length: 41 }, (_, i) => i * 3); // 0,3,6,...,120
+const DEFAULT_ICE_FORECAST_HOURS = Array.from({ length: 10 }, (_, i) => i * 24); // 0,24,48,...,216
 const SPEED_OPTIONS = [1, 2, 4];
 const SPEED_INTERVAL: Record<number, number> = { 1: 2000, 2: 1000, 4: 500 };
+
+/** Extract sorted numeric hours from frame keys returned by the backend. */
+function deriveHoursFromFrames(frames: Record<string, unknown>): number[] {
+  const hours = Object.keys(frames).map(Number).filter(n => !isNaN(n)).sort((a, b) => a - b);
+  return hours.length > 0 ? hours : [];
+}
 
 export default function ForecastTimeline({
   visible,
@@ -50,15 +57,28 @@ export default function ForecastTimeline({
   const isCurrentMode = layerType === 'currents';
   const isIceMode = layerType === 'ice';
   const hasForecast = isWindMode || isWaveMode || isCurrentMode || isIceMode;
-  const activeHours = isIceMode ? ICE_FORECAST_HOURS : FORECAST_HOURS;
 
   const [currentHour, setCurrentHour] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [speed, setSpeed] = useState(1);
   const [isLoading, setIsLoading] = useState(false);
-  const [loadProgress, setLoadProgress] = useState({ cached: 0, total: 41 });
+  const [loadProgress, setLoadProgress] = useState({ cached: 0, total: 0 });
   const [runTime, setRunTime] = useState<string | null>(null);
   const [prefetchComplete, setPrefetchComplete] = useState(false);
+
+  // Dynamic hours derived from actual DB/API response (replaces hardcoded constants)
+  const [availableHours, setAvailableHours] = useState<number[]>([]);
+  const availableHoursRef = useRef<number[]>([]);
+  useEffect(() => { availableHoursRef.current = availableHours; }, [availableHours]);
+
+  // Reset available hours when layer changes so stale data from a previous layer doesn't persist
+  useEffect(() => { setAvailableHours([]); setCurrentHour(0); }, [layerType]);
+
+  // Effective hours: use DB-derived if available, else defaults
+  const defaultHours = isIceMode ? DEFAULT_ICE_FORECAST_HOURS : DEFAULT_FORECAST_HOURS;
+  const activeHours = availableHours.length > 0 ? availableHours : defaultHours;
+  const sliderMax = activeHours.length > 0 ? activeHours[activeHours.length - 1] : 0;
+  const sliderStep = activeHours.length >= 2 ? activeHours[1] - activeHours[0] : (isIceMode ? 24 : 3);
 
   // Wind frames
   const [windFrames, setWindFrames] = useState<Record<string, VelocityData[]>>({});
@@ -100,6 +120,7 @@ export default function ForecastTimeline({
       const bp = boundsRef.current ?? {};
       const data: ForecastFrames = await apiClient.getForecastFrames(bp);
       setWindFrames(data.frames);
+      setAvailableHours(deriveHoursFromFrames(data.frames));
       setRunTime(`${data.run_date} ${data.run_hour}Z`);
       setPrefetchComplete(true);
       setIsLoading(false);
@@ -133,6 +154,7 @@ export default function ForecastTimeline({
         }
       }
       setWaveFrameData(data);
+      setAvailableHours(deriveHoursFromFrames(data.frames));
       const rt = data.run_time;
       if (rt) {
         try {
@@ -244,6 +266,7 @@ export default function ForecastTimeline({
       const frameKeys = Object.keys(data.frames);
       debugLog('info', 'CURRENT', `Loaded ${frameKeys.length} frames in ${dt}s, grid=${data.ny}x${data.nx}`);
       setCurrentFrameData(data);
+      setAvailableHours(deriveHoursFromFrames(data.frames));
       if (data.run_time) {
         try {
           const d = new Date(data.run_time);
@@ -317,6 +340,7 @@ export default function ForecastTimeline({
       const frameKeys = Object.keys(data.frames);
       debugLog('info', 'ICE', `Loaded ${frameKeys.length} frames in ${dt}s, grid=${data.ny}x${data.nx}`);
       setIceFrameData(data);
+      setAvailableHours(deriveHoursFromFrames(data.frames));
       if (data.run_time) {
         try {
           const d = new Date(data.run_time);
@@ -384,9 +408,10 @@ export default function ForecastTimeline({
     if (isPlaying && prefetchComplete && hasForecast) {
       playIntervalRef.current = setInterval(() => {
         setCurrentHour((prev) => {
-          const hrs = isIceMode ? ICE_FORECAST_HOURS : FORECAST_HOURS;
+          const fallback = isIceMode ? DEFAULT_ICE_FORECAST_HOURS : DEFAULT_FORECAST_HOURS;
+          const hrs = availableHoursRef.current.length > 0 ? availableHoursRef.current : fallback;
           const idx = hrs.indexOf(prev);
-          const nextIdx = (idx + 1) % hrs.length;
+          const nextIdx = idx >= 0 ? (idx + 1) % hrs.length : 0;
           const nextHour = hrs[nextIdx];
 
           if (isWindMode) {
@@ -485,7 +510,7 @@ export default function ForecastTimeline({
               )}
             </div>
             <div className="text-xs text-gray-500 mt-0.5">
-              Forecast timeline available for Wind and Waves layers
+              Forecast timeline available for Wind, Waves, Currents and Ice layers
             </div>
           </div>
           <button onClick={handleClose} className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded text-gray-400 hover:text-white hover:bg-gray-700 transition-colors">
@@ -556,8 +581,8 @@ export default function ForecastTimeline({
           <input
             type="range"
             min={0}
-            max={isIceMode ? 216 : 120}
-            step={isIceMode ? 24 : 3}
+            max={sliderMax}
+            step={sliderStep}
             value={currentHour}
             onChange={handleSliderChange}
             disabled={!prefetchComplete}
@@ -566,12 +591,19 @@ export default function ForecastTimeline({
               [&::-moz-range-thumb]:w-4 [&::-moz-range-thumb]:h-4 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:bg-primary-400 [&::-moz-range-thumb]:border-0`}
           />
           <div className="flex justify-between mt-1 text-[10px]">
-            {(isIceMode
-              ? ['Day 0','Day 1','Day 2','Day 3','Day 4','Day 5','Day 6','Day 7','Day 8','Day 9']
-              : ['0h','24h','48h','72h','96h','120h']
-            ).map(label => (
-              <span key={label} className={sourceColor}>{label}</span>
-            ))}
+            {(() => {
+              // Generate ~6-10 evenly-spaced labels from the active hours
+              const maxLabels = isIceMode ? activeHours.length : 6;
+              const labelStep = Math.max(1, Math.floor((activeHours.length - 1) / (maxLabels - 1)));
+              const indices: number[] = [];
+              for (let i = 0; i < activeHours.length; i += labelStep) indices.push(i);
+              if (indices[indices.length - 1] !== activeHours.length - 1) indices.push(activeHours.length - 1);
+              return indices.map(i => {
+                const h = activeHours[i];
+                const label = isIceMode ? `Day ${h / 24}` : `${h}h`;
+                return <span key={h} className={sourceColor}>{label}</span>;
+              });
+            })()}
           </div>
         </div>
 
