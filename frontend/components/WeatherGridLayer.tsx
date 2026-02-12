@@ -339,8 +339,14 @@ function WeatherGridLayerInner({
               color = waveColor(h);
             } else if (extValues) {
               const val = bilinearInterpolate(extValues, latIdx, lonIdx, latFrac, lonFrac, ny, nx);
+              // NaN guard: CMEMS returns NaN outside coverage — render transparent
+              if (Number.isNaN(val)) {
+                const idx = (py * DS + px) * 4;
+                pixels[idx + 3] = 0;
+                continue;
+              }
               if (currentMode === 'ice') color = iceColor(val);
-              else if (currentMode === 'visibility') color = visibilityColor(val);
+              else if (currentMode === 'visibility') color = visibilityColor(val * 1000); // API returns km, function expects meters
               else if (currentMode === 'sst') color = sstColor(val);
               else color = swellColor(val); // swell
             } else {

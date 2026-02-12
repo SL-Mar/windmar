@@ -137,6 +137,11 @@ export default function HomePage() {
       resolution: getResolutionForZoom(v.zoom),
     };
 
+    // Clear stale extended data immediately when switching layers
+    if (activeLayer === 'ice' || activeLayer === 'visibility' || activeLayer === 'sst' || activeLayer === 'swell') {
+      setExtendedWeatherData(null);
+    }
+
     setIsLoadingWeather(true);
     const t0 = performance.now();
     debugLog('info', 'API', `Loading ${activeLayer} weather: zoom=${v.zoom}, bbox=[${params.lat_min.toFixed(1)},${params.lat_max.toFixed(1)},${params.lon_min.toFixed(1)},${params.lon_max.toFixed(1)}]`);
@@ -518,6 +523,10 @@ export default function HomePage() {
     if (weatherLayer === 'wind') return 'NOAA GFS 0.25\u00B0';
     if (weatherLayer === 'waves') return 'CMEMS WAV 1/12\u00B0';
     if (weatherLayer === 'currents') return 'CMEMS PHY 1/12\u00B0';
+    if (weatherLayer === 'ice') return 'CMEMS ICE';
+    if (weatherLayer === 'visibility') return 'NOAA GFS';
+    if (weatherLayer === 'sst') return 'CMEMS PHY';
+    if (weatherLayer === 'swell') return 'CMEMS WAV';
     return undefined;
   }, [weatherLayer]);
 
