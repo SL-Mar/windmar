@@ -14,6 +14,71 @@ interface WeatherGridLayerProps {
   showArrows?: boolean;
 }
 
+// Reusable color ramp interpolator for meteorological fields
+type ColorStop = [number, number, number, number]; // [threshold, R, G, B]
+
+function interpolateColorRamp(
+  value: number, stops: ColorStop[],
+  alphaLow: number, alphaHigh: number, alphaDefault: number
+): [number, number, number, number] {
+  if (value <= stops[0][0]) return [stops[0][1], stops[0][2], stops[0][3], alphaLow];
+  if (value >= stops[stops.length - 1][0])
+    return [stops[stops.length - 1][1], stops[stops.length - 1][2], stops[stops.length - 1][3], alphaHigh];
+
+  for (let i = 0; i < stops.length - 1; i++) {
+    if (value >= stops[i][0] && value < stops[i + 1][0]) {
+      const t = (value - stops[i][0]) / (stops[i + 1][0] - stops[i][0]);
+      return [
+        Math.round(stops[i][1] + t * (stops[i + 1][1] - stops[i][1])),
+        Math.round(stops[i][2] + t * (stops[i + 1][2] - stops[i][2])),
+        Math.round(stops[i][3] + t * (stops[i + 1][3] - stops[i][3])),
+        alphaDefault,
+      ];
+    }
+  }
+  return [stops[stops.length - 1][1], stops[stops.length - 1][2], stops[stops.length - 1][3], alphaHigh];
+}
+
+// WMO/TD-No. 1215 ice concentration ramp stops (fraction 0-1)
+const ICE_RAMP: ColorStop[] = [
+  [0.00,   0, 100, 255],  // ice free — blue
+  [0.10, 150, 200, 255],  // < 1/10 — light blue
+  [0.30, 140, 255, 160],  // 1-3/10 — green
+  [0.60, 255, 255,   0],  // 4-6/10 — yellow
+  [0.80, 255, 125,   7],  // 7-8/10 — orange
+  [1.00, 255,   0,   0],  // 9-10/10 — red
+];
+
+// SST ramp with near-freezing stop for Baltic/Arctic (°C)
+const SST_RAMP: ColorStop[] = [
+  [-2,  20,  30, 140],  // below freezing — deep blue
+  [ 2,  40,  80, 200],  // near freezing — blue
+  [ 8,   0, 180, 220],  // cold — cyan
+  [14,   0, 200,  80],  // cool — green
+  [20, 220, 220,   0],  // warm — yellow
+  [26, 240, 130,   0],  // hot — orange
+  [32, 220,  30,  30],  // tropical — red
+];
+
+// Swell height ramp (meters)
+const SWELL_RAMP: ColorStop[] = [
+  [0,  60, 120, 200],  // calm — blue
+  [1,   0, 200, 180],  // 1m — teal
+  [2, 100, 200,  50],  // 2m — green
+  [3, 240, 200,   0],  // 3m — yellow
+  [5, 240, 100,   0],  // 5m — orange
+  [8, 200,  30,  30],  // 8m+ — red
+];
+
+// Visibility ramp (meters) — grey-blue fog severity
+const VIS_RAMP: ColorStop[] = [
+  [    0,  60,  60, 100],  // zero vis — dark
+  [ 1000, 100, 100, 140],  // 1km
+  [ 2000, 140, 140, 160],  // 2km
+  [ 5000, 180, 180, 190],  // 5km
+  [10000, 220, 220, 230],  // 10km — light
+];
+
 // Wind color scale: m/s → RGBA
 function windColor(speed: number): [number, number, number, number] {
   // 0→blue, 5→cyan, 10→green, 15→yellow, 20→orange, 25+→red
@@ -73,101 +138,30 @@ function waveColor(height: number): [number, number, number, number] {
   return [128, 0, 0, 200];
 }
 
-// Ice concentration color scale: fraction (0-1) → RGBA
-// 0-5% blue-tint, 5-15% yellow-warning, >15% red-exclusion
+// Ice concentration color scale: fraction (0-1) → RGBA (WMO/TD-No. 1215)
 function iceColor(concentration: number): [number, number, number, number] {
   if (concentration <= 0.01) return [0, 0, 0, 0]; // below 1% — transparent
-  if (concentration <= 0.05) {
-    const t = concentration / 0.05;
-    return [Math.round(100 + t * 80), Math.round(180 + t * 40), Math.round(220 - t * 20), 150];
-  }
-  if (concentration <= 0.15) {
-    const t = (concentration - 0.05) / 0.10;
-    return [Math.round(180 + t * 60), Math.round(220 - t * 100), Math.round(50 - t * 30), 170];
-  }
-  // >15% — red zone (exclusion territory)
-  const t = Math.min(1, (concentration - 0.15) / 0.35);
-  return [Math.round(220 + t * 20), Math.round(30 + t * 10), Math.round(20), 190];
+  return interpolateColorRamp(concentration, ICE_RAMP, 120, 200, 180);
 }
 
-// Visibility color scale: meters → RGBA
-// <1000m dark grey (fog), 1000-5000m grey, >5000m fading out
+// Visibility color scale: meters → RGBA (fog severity grey-blue ramp)
+// Alpha computed inversely: dense fog=200, clear=0 (transparent above 10km)
 function visibilityColor(vis_m: number): [number, number, number, number] {
   if (vis_m > 10000) return [0, 0, 0, 0]; // clear — transparent
-  if (vis_m > 5000) {
-    const t = (10000 - vis_m) / 5000;
-    return [180, 180, 180, Math.round(t * 80)];
-  }
-  if (vis_m > 2000) {
-    const t = (5000 - vis_m) / 3000;
-    return [Math.round(180 - t * 40), Math.round(180 - t * 40), Math.round(180 - t * 20), Math.round(80 + t * 60)];
-  }
-  if (vis_m > 1000) {
-    const t = (2000 - vis_m) / 1000;
-    return [Math.round(140 - t * 30), Math.round(140 - t * 30), Math.round(160 - t * 20), Math.round(140 + t * 30)];
-  }
-  // <1000m — dense fog, dark
-  const t = Math.min(1, (1000 - vis_m) / 1000);
-  return [Math.round(110 - t * 30), Math.round(110 - t * 30), Math.round(140 - t * 30), Math.round(170 + t * 30)];
+  const [, r, g, b] = interpolateColorRamp(vis_m, VIS_RAMP, 0, 0, 0);
+  // Inverse alpha: worse visibility = more opaque
+  const alpha = Math.round(200 * (1 - Math.min(1, vis_m / 10000)));
+  return [r, g, b, alpha];
 }
 
-// SST color scale: Celsius → RGBA (blue=cold → cyan → green → yellow → red=warm)
+// SST color scale: Celsius → RGBA (7-stop ramp with near-freezing for Baltic/Arctic)
 function sstColor(temp: number): [number, number, number, number] {
-  const stops: [number, number, number, number][] = [
-    [-2,   30,  40, 180],  // below freezing — deep blue
-    [ 5,   50, 120, 220],  // cold — blue
-    [10,    0, 200, 220],  // cool — cyan
-    [15,    0, 200,  80],  // mild — green
-    [20,  200, 220,   0],  // warm — yellow
-    [25,  240, 140,   0],  // hot — orange
-    [30,  220,  40,  30],  // tropical — red
-  ];
-
-  if (temp <= stops[0][0]) return [stops[0][1], stops[0][2], stops[0][3], 160];
-  if (temp >= stops[stops.length - 1][0])
-    return [stops[stops.length - 1][1], stops[stops.length - 1][2], stops[stops.length - 1][3], 180];
-
-  for (let i = 0; i < stops.length - 1; i++) {
-    if (temp >= stops[i][0] && temp < stops[i + 1][0]) {
-      const t = (temp - stops[i][0]) / (stops[i + 1][0] - stops[i][0]);
-      return [
-        Math.round(stops[i][1] + t * (stops[i + 1][1] - stops[i][1])),
-        Math.round(stops[i][2] + t * (stops[i + 1][2] - stops[i][2])),
-        Math.round(stops[i][3] + t * (stops[i + 1][3] - stops[i][3])),
-        170,
-      ];
-    }
-  }
-  return [220, 40, 30, 180];
+  return interpolateColorRamp(temp, SST_RAMP, 160, 180, 170);
 }
 
-// Swell height color scale: meters → RGBA (reuse wave palette, softer)
+// Swell height color scale: meters → RGBA
 function swellColor(height: number): [number, number, number, number] {
-  const stops: [number, number, number, number][] = [
-    [0,   60, 120, 200],  // 0m  - calm blue
-    [1,    0, 200, 180],  // 1m  - teal
-    [2,  100, 200,  50],  // 2m  - green
-    [3,  240, 200,   0],  // 3m  - yellow
-    [5,  240, 100,   0],  // 5m  - orange
-    [8,  200,  30,  30],  // 8m+ - red
-  ];
-
-  if (height <= stops[0][0]) return [stops[0][1], stops[0][2], stops[0][3], 140];
-  if (height >= stops[stops.length - 1][0])
-    return [stops[stops.length - 1][1], stops[stops.length - 1][2], stops[stops.length - 1][3], 190];
-
-  for (let i = 0; i < stops.length - 1; i++) {
-    if (height >= stops[i][0] && height < stops[i + 1][0]) {
-      const t = (height - stops[i][0]) / (stops[i + 1][0] - stops[i][0]);
-      return [
-        Math.round(stops[i][1] + t * (stops[i + 1][1] - stops[i][1])),
-        Math.round(stops[i][2] + t * (stops[i + 1][2] - stops[i][2])),
-        Math.round(stops[i][3] + t * (stops[i + 1][3] - stops[i][3])),
-        160,
-      ];
-    }
-  }
-  return [200, 30, 30, 190];
+  return interpolateColorRamp(height, SWELL_RAMP, 140, 190, 160);
 }
 
 

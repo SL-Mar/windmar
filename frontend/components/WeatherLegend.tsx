@@ -32,28 +32,30 @@ const CURRENT_STOPS = [
 ];
 
 const ICE_STOPS = [
-  { value: 0, color: 'rgb(100,180,220)' },
-  { value: 5, color: 'rgb(180,220,50)' },
-  { value: 15, color: 'rgb(240,120,20)' },
-  { value: 50, color: 'rgb(220,30,20)' },
+  { value: 0, color: 'rgb(0,100,255)' },
+  { value: 10, color: 'rgb(150,200,255)' },
+  { value: 30, color: 'rgb(140,255,160)' },
+  { value: 60, color: 'rgb(255,255,0)' },
+  { value: 80, color: 'rgb(255,125,7)' },
+  { value: 100, color: 'rgb(255,0,0)' },
 ];
 
 const VIS_STOPS = [
-  { value: 0, color: 'rgb(80,80,110)' },
-  { value: 1, color: 'rgb(110,110,140)' },
+  { value: 0, color: 'rgb(60,60,100)' },
+  { value: 1, color: 'rgb(100,100,140)' },
   { value: 2, color: 'rgb(140,140,160)' },
-  { value: 5, color: 'rgb(180,180,180)' },
-  { value: 10, color: 'rgb(210,210,210)' },
+  { value: 5, color: 'rgb(180,180,190)' },
+  { value: 10, color: 'rgb(220,220,230)' },
 ];
 
 const SST_STOPS = [
-  { value: -2, color: 'rgb(30,40,180)' },
-  { value: 5, color: 'rgb(50,120,220)' },
-  { value: 10, color: 'rgb(0,200,220)' },
-  { value: 15, color: 'rgb(0,200,80)' },
-  { value: 20, color: 'rgb(200,220,0)' },
-  { value: 25, color: 'rgb(240,140,0)' },
-  { value: 30, color: 'rgb(220,40,30)' },
+  { value: -2, color: 'rgb(20,30,140)' },
+  { value: 2, color: 'rgb(40,80,200)' },
+  { value: 8, color: 'rgb(0,180,220)' },
+  { value: 14, color: 'rgb(0,200,80)' },
+  { value: 20, color: 'rgb(220,220,0)' },
+  { value: 26, color: 'rgb(240,130,0)' },
+  { value: 32, color: 'rgb(220,30,30)' },
 ];
 
 const SWELL_STOPS = [
