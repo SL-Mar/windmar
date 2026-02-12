@@ -2423,7 +2423,7 @@ def _rebuild_ice_cache_from_db(cache_key, lat_min, lat_max, lon_min, lon_max):
 
     cache_data = {
         "run_time": run_time.isoformat() if run_time else "",
-        "total_hours": 10,
+        "total_hours": len(frames),
         "cached_hours": len(frames),
         "source": "cmems",
         "lats": shared_lats,
@@ -2451,21 +2451,22 @@ async def api_get_ice_forecast_status(
     """Get ice forecast prefetch status."""
     cache_key = f"ice_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
     cached = _ice_cache_get(cache_key)
-    total_hours = 10
 
     prefetch_running = _is_ice_prefetch_running()
 
     if cached:
         cached_hours = len(cached.get("frames", {}))
+        # total_hours matches cached_hours once prefetch finishes (CMEMS may have < 10 days)
+        total_hours = cached_hours if not prefetch_running else max(cached_hours + 1, 10)
         return {
             "total_hours": total_hours,
             "cached_hours": cached_hours,
-            "complete": cached_hours >= total_hours,
+            "complete": cached_hours > 0 and not prefetch_running,
             "prefetch_running": prefetch_running,
         }
 
     return {
-        "total_hours": total_hours,
+        "total_hours": 10,
         "cached_hours": 0,
         "complete": False,
         "prefetch_running": prefetch_running,
@@ -2561,7 +2562,7 @@ async def api_trigger_ice_forecast_prefetch(
             cache_key = f"ice_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
             _ice_cache_put(cache_key, {
                 "run_time": first_wd.time.isoformat() if first_wd.time else "",
-                "total_hours": 10,
+                "total_hours": len(frames),
                 "cached_hours": len(frames),
                 "source": "cmems",
                 "lats": sub_lats.tolist() if hasattr(sub_lats, 'tolist') else list(sub_lats),
@@ -2618,7 +2619,7 @@ async def api_get_ice_forecast_frames(
     if not cached:
         return {
             "run_time": "",
-            "total_hours": 10,
+            "total_hours": 0,
             "cached_hours": 0,
             "source": "none",
             "lats": [],
