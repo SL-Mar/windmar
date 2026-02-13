@@ -1,15 +1,14 @@
-name: Deploy Demo
+name: Deploy Demo                                                                                              
 
-  on:
+on:
     push:
       branches: [main]
     workflow_dispatch:
 
-  env:
+env:
     REGISTRY: ghcr.io
     IMAGE_PREFIX: ${{ github.repository }}
-
-  jobs:
+jobs:
     build:
       runs-on: ubuntu-latest
       permissions:
