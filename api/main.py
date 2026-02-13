@@ -2214,15 +2214,20 @@ async def api_get_wave_forecast_frames(
     lon_min: float = Query(-15.0),
     lon_max: float = Query(40.0),
 ):
-    """Return all cached CMEMS wave forecast frames."""
+    """Return all cached CMEMS wave forecast frames.
+
+    Serves the raw JSON file to avoid parse+re-serialize overhead.
+    """
+    from starlette.responses import Response as RawResponse
     cache_key = f"wave_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
-    cached = _wave_cache_get(cache_key)
+    cache_file = _wave_cache_path(cache_key)
+    if cache_file.exists():
+        return RawResponse(content=cache_file.read_bytes(), media_type="application/json")
 
     # Fallback: rebuild from PostgreSQL
-    if not cached:
-        cached = await asyncio.to_thread(
-            _rebuild_wave_cache_from_db, cache_key, lat_min, lat_max, lon_min, lon_max
-        )
+    cached = await asyncio.to_thread(
+        _rebuild_wave_cache_from_db, cache_key, lat_min, lat_max, lon_min, lon_max
+    )
 
     if not cached:
         return {
@@ -2454,15 +2459,20 @@ async def api_get_current_forecast_frames(
     lon_min: float = Query(-15.0),
     lon_max: float = Query(40.0),
 ):
-    """Return all cached CMEMS current forecast frames."""
+    """Return all cached CMEMS current forecast frames.
+
+    Serves the raw JSON file to avoid parse+re-serialize overhead.
+    """
+    from starlette.responses import Response as RawResponse
     cache_key = f"current_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
-    cached = _current_cache_get(cache_key)
+    cache_file = _current_cache_path(cache_key)
+    if cache_file.exists():
+        return RawResponse(content=cache_file.read_bytes(), media_type="application/json")
 
     # Fallback: rebuild from PostgreSQL
-    if not cached:
-        cached = await asyncio.to_thread(
-            _rebuild_current_cache_from_db, cache_key, lat_min, lat_max, lon_min, lon_max
-        )
+    cached = await asyncio.to_thread(
+        _rebuild_current_cache_from_db, cache_key, lat_min, lat_max, lon_min, lon_max
+    )
 
     if not cached:
         return {
@@ -2757,15 +2767,20 @@ async def api_get_ice_forecast_frames(
     lon_min: float = Query(-15.0),
     lon_max: float = Query(40.0),
 ):
-    """Return all cached CMEMS ice forecast frames."""
+    """Return all cached CMEMS ice forecast frames.
+
+    Serves the raw JSON file to avoid parse+re-serialize overhead.
+    """
+    from starlette.responses import Response as RawResponse
     cache_key = f"ice_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
-    cached = _ice_cache_get(cache_key)
+    cache_file = _ice_cache_path(cache_key)
+    if cache_file.exists():
+        return RawResponse(content=cache_file.read_bytes(), media_type="application/json")
 
     # Fallback: rebuild from PostgreSQL
-    if not cached:
-        cached = await asyncio.to_thread(
-            _rebuild_ice_cache_from_db, cache_key, lat_min, lat_max, lon_min, lon_max
-        )
+    cached = await asyncio.to_thread(
+        _rebuild_ice_cache_from_db, cache_key, lat_min, lat_max, lon_min, lon_max
+    )
 
     if not cached:
         return {
@@ -2982,24 +2997,27 @@ async def api_get_sst_forecast_frames(
     lon_min: float = Query(-15.0),
     lon_max: float = Query(40.0),
 ):
-    """Return all cached CMEMS SST forecast frames."""
+    """Return all cached CMEMS SST forecast frames.
+
+    Serves the raw JSON file to avoid parse+re-serialize overhead.
+    """
+    from starlette.responses import Response as RawResponse
     cache_key = f"sst_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
-    cached = _sst_cache_get(cache_key)
+    cache_file = _sst_cache_path(cache_key)
+    if cache_file.exists():
+        return RawResponse(content=cache_file.read_bytes(), media_type="application/json")
 
-    if not cached:
-        return {
-            "run_time": "",
-            "total_hours": 0,
-            "cached_hours": 0,
-            "source": "none",
-            "lats": [],
-            "lons": [],
-            "ny": 0,
-            "nx": 0,
-            "frames": {},
-        }
-
-    return cached
+    return {
+        "run_time": "",
+        "total_hours": 0,
+        "cached_hours": 0,
+        "source": "none",
+        "lats": [],
+        "lons": [],
+        "ny": 0,
+        "nx": 0,
+        "frames": {},
+    }
 
 
 # ======================================================================
@@ -3201,24 +3219,27 @@ async def api_get_vis_forecast_frames(
     lon_min: float = Query(-15.0),
     lon_max: float = Query(40.0),
 ):
-    """Return all cached GFS visibility forecast frames."""
+    """Return all cached GFS visibility forecast frames.
+
+    Serves the raw JSON file to avoid parse+re-serialize overhead.
+    """
+    from starlette.responses import Response as RawResponse
     cache_key = f"vis_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
-    cached = _vis_cache_get(cache_key)
+    cache_file = _vis_cache_path(cache_key)
+    if cache_file.exists():
+        return RawResponse(content=cache_file.read_bytes(), media_type="application/json")
 
-    if not cached:
-        return {
-            "run_time": "",
-            "total_hours": 0,
-            "cached_hours": 0,
-            "source": "none",
-            "lats": [],
-            "lons": [],
-            "ny": 0,
-            "nx": 0,
-            "frames": {},
-        }
-
-    return cached
+    return {
+        "run_time": "",
+        "total_hours": 0,
+        "cached_hours": 0,
+        "source": "none",
+        "lats": [],
+        "lons": [],
+        "ny": 0,
+        "nx": 0,
+        "frames": {},
+    }
 
 
 @app.get("/api/weather/waves")

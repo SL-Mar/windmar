@@ -212,6 +212,15 @@ export default function ForecastTimeline({
   useEffect(() => {
     if (!visible || !isWindMode || !boundsRef.current) return;
 
+    // Client-side cache hit — restore UI state instantly, skip network
+    if (Object.keys(windFramesRef.current).length > 0) {
+      setAvailableHours(deriveHoursFromFrames(windFramesRef.current));
+      setPrefetchComplete(true);
+      setIsLoading(false);
+      if (windFramesRef.current['0']) onForecastHourChange(0, windFramesRef.current['0']);
+      return;
+    }
+
     let cancelled = false;
     const bp = boundsRef.current;
 
@@ -249,6 +258,16 @@ export default function ForecastTimeline({
   // ------------------------------------------------------------------
   useEffect(() => {
     if (!visible || !isWaveMode || !boundsRef.current) return;
+
+    // Client-side cache hit
+    if (waveFrameDataRef.current) {
+      const data = waveFrameDataRef.current;
+      setAvailableHours(deriveHoursFromFrames(data.frames));
+      setPrefetchComplete(true);
+      setIsLoading(false);
+      if (data.frames['0'] && onWaveForecastHourChange) onWaveForecastHourChange(0, data);
+      return;
+    }
 
     let cancelled = false;
     const bp = boundsRef.current;
@@ -322,6 +341,16 @@ export default function ForecastTimeline({
   // ------------------------------------------------------------------
   useEffect(() => {
     if (!visible || !isCurrentMode || !boundsRef.current) return;
+
+    // Client-side cache hit
+    if (currentFrameDataRef.current) {
+      const data = currentFrameDataRef.current;
+      setAvailableHours(deriveHoursFromFrames(data.frames));
+      setPrefetchComplete(true);
+      setIsLoading(false);
+      if (data.frames['0'] && onCurrentForecastHourChange) onCurrentForecastHourChange(0, data);
+      return;
+    }
 
     let cancelled = false;
     const bp = boundsRef.current;
@@ -397,6 +426,16 @@ export default function ForecastTimeline({
   useEffect(() => {
     if (!visible || !isIceMode || !boundsRef.current) return;
 
+    // Client-side cache hit
+    if (iceFrameDataRef.current) {
+      const data = iceFrameDataRef.current;
+      setAvailableHours(deriveHoursFromFrames(data.frames));
+      setPrefetchComplete(true);
+      setIsLoading(false);
+      if (data.frames['0'] && onIceForecastHourChange) onIceForecastHourChange(0, data);
+      return;
+    }
+
     let cancelled = false;
     const bp = boundsRef.current;
 
@@ -434,6 +473,16 @@ export default function ForecastTimeline({
   // ------------------------------------------------------------------
   useEffect(() => {
     if (!visible || !isSwellMode || !boundsRef.current) return;
+
+    // Client-side cache hit (swell reuses wave frames)
+    if (waveFrameDataRef.current) {
+      const data = waveFrameDataRef.current;
+      setAvailableHours(deriveHoursFromFrames(data.frames));
+      setPrefetchComplete(true);
+      setIsLoading(false);
+      if (data.frames['0'] && onSwellForecastHourChange) onSwellForecastHourChange(0, data);
+      return;
+    }
 
     let cancelled = false;
     const bp = boundsRef.current;
@@ -509,6 +558,16 @@ export default function ForecastTimeline({
   useEffect(() => {
     if (!visible || !isSstMode || !boundsRef.current) return;
 
+    // Client-side cache hit
+    if (sstFrameDataRef.current) {
+      const data = sstFrameDataRef.current;
+      setAvailableHours(deriveHoursFromFrames(data.frames));
+      setPrefetchComplete(true);
+      setIsLoading(false);
+      if (data.frames['0'] && onSstForecastHourChange) onSstForecastHourChange(0, data);
+      return;
+    }
+
     let cancelled = false;
     const bp = boundsRef.current;
 
@@ -582,6 +641,16 @@ export default function ForecastTimeline({
   // ------------------------------------------------------------------
   useEffect(() => {
     if (!visible || !isVisMode || !boundsRef.current) return;
+
+    // Client-side cache hit
+    if (visFrameDataRef.current) {
+      const data = visFrameDataRef.current;
+      setAvailableHours(deriveHoursFromFrames(data.frames));
+      setPrefetchComplete(true);
+      setIsLoading(false);
+      if (data.frames['0'] && onVisForecastHourChange) onVisForecastHourChange(0, data);
+      return;
+    }
 
     let cancelled = false;
     const bp = boundsRef.current;
