@@ -25,6 +25,9 @@ copernicusmarine>=2.0.0
 xarray>=2024.1.0
 netcdf4>=1.6.0
 
+# GFS GRIB2 file parsing (requires libeccodes runtime)
+pygrib>=2.1.0
+
 # Excel file parsing
 openpyxl>=3.1.0
 
@@ -42,6 +45,7 @@ redis>=5.0.0
 # =============================================================================
 fastapi>=0.109.0
 uvicorn[standard]>=0.25.0
+gunicorn>=21.2.0
 python-multipart>=0.0.6
 slowapi>=0.1.9
 

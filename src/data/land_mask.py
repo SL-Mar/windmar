@@ -176,19 +176,32 @@ def _is_coastal_water(lat: float, lon: float) -> bool:
 def is_path_clear(
     lat1: float, lon1: float,
     lat2: float, lon2: float,
-    num_checks: int = 10
+    num_checks: int = 0,
 ) -> bool:
     """
     Check if a path between two points crosses land.
 
+    Sampling density scales with segment length (~1 check per 2 nm) so
+    that short edges at fine grid resolution and long post-smoothing
+    segments are both checked adequately.
+
     Args:
         lat1, lon1: Start point
         lat2, lon2: End point
-        num_checks: Number of points to sample along path
+        num_checks: Number of points to sample along path.
+            0 (default) = auto-scale based on distance.
 
     Returns:
         True if path is entirely over water
     """
+    if num_checks <= 0:
+        # Approximate distance in nm (Pythagorean on lat/lon, 60nm per degree)
+        dlat = (lat2 - lat1) * 60
+        dlon = (lon2 - lon1) * 60 * math.cos(math.radians((lat1 + lat2) / 2))
+        dist_nm = math.sqrt(dlat * dlat + dlon * dlon)
+        # ~1 check per 2 nm, minimum 10, maximum 200
+        num_checks = max(10, min(200, int(dist_nm / 2)))
+
     for i in range(num_checks + 1):
         t = i / num_checks
         lat = lat1 + t * (lat2 - lat1)

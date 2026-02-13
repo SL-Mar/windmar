@@ -36,6 +36,7 @@ export default function RouteImport({ onImport }: RouteImportProps) {
       const waypoints: Position[] = routeData.waypoints.map((wp) => ({
         lat: wp.lat,
         lon: wp.lon,
+        name: wp.name,
       }));
 
       onImport(waypoints, routeData.name);

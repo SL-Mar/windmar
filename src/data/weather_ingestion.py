@@ -36,21 +36,25 @@ class WeatherIngestionService:
     def _get_conn(self):
         return psycopg2.connect(self.db_url)
 
-    def ingest_all(self):
-        """Run full ingestion cycle: wind + waves + currents.
+    def ingest_all(self, force: bool = False):
+        """Run full ingestion cycle: wind + waves + currents + ice.
 
         Downloads GFS wind (41 forecast hours, ~2-3 min with rate limiting),
-        CMEMS waves, and CMEMS currents into PostgreSQL for sub-second
-        route optimization queries.
+        CMEMS waves, CMEMS currents, and CMEMS ice into PostgreSQL for
+        sub-second route optimization queries.
+
+        Args:
+            force: If True, bypass freshness checks and re-ingest all sources.
         """
-        logger.info("Starting weather ingestion cycle")
-        self.ingest_wind()
-        self.ingest_waves()
-        self.ingest_currents()
+        logger.info(f"Starting weather ingestion cycle (force={force})")
+        self.ingest_wind(force=force)
+        self.ingest_waves(force=force)
+        self.ingest_currents(force=force)
+        self.ingest_ice(force=force)
         self._supersede_old_runs()
         logger.info("Weather ingestion cycle complete")
 
-    def ingest_wind(self):
+    def ingest_wind(self, force: bool = False):
         """Fetch GFS wind grids for forecast hours 0-120 (3-hourly).
 
         Downloads 41 GRIB files from NOAA NOMADS with 2s rate limiting
@@ -61,7 +65,7 @@ class WeatherIngestionService:
 
         source = "gfs"
 
-        if self._has_multistep_run(source):
+        if not force and self._has_multistep_run(source):
             logger.debug("Skipping wind ingestion — multi-timestep GFS run exists in DB")
             return
 
@@ -156,8 +160,8 @@ class WeatherIngestionService:
         finally:
             conn.close()
 
-    def _has_multistep_run(self, source: str) -> bool:
-        """Check if a multi-timestep (>1 hour) complete run exists for source."""
+    def _has_multistep_run(self, source: str, max_age_hours: float = 12.0) -> bool:
+        """Check if a recent multi-timestep (>1 hour) complete run exists for source."""
         conn = self._get_conn()
         try:
             cur = conn.cursor()
@@ -165,8 +169,9 @@ class WeatherIngestionService:
                 """SELECT 1 FROM weather_forecast_runs
                    WHERE source = %s AND status = 'complete'
                      AND array_length(forecast_hours, 1) > 1
+                     AND ingested_at > NOW() - INTERVAL '%s hours'
                    LIMIT 1""",
-                (source,),
+                (source, max_age_hours),
             )
             return cur.fetchone() is not None
         except Exception:
@@ -174,14 +179,14 @@ class WeatherIngestionService:
         finally:
             conn.close()
 
-    def ingest_waves(self):
+    def ingest_waves(self, force: bool = False):
         """Fetch CMEMS wave snapshot (Hs, Tp, Dir) including swell decomposition.
 
         Skips if a multi-timestep forecast run already exists in the DB
         (to avoid replacing it with a single snapshot).
         """
         source = "cmems_wave"
-        if self._has_multistep_run(source):
+        if not force and self._has_multistep_run(source):
             logger.debug("Skipping wave snapshot — multi-timestep run exists in DB")
             return
 
@@ -263,13 +268,13 @@ class WeatherIngestionService:
         finally:
             conn.close()
 
-    def ingest_currents(self):
+    def ingest_currents(self, force: bool = False):
         """Fetch CMEMS current data (single snapshot).
 
         Skips if a multi-timestep forecast run already exists in the DB.
         """
         source = "cmems_current"
-        if self._has_multistep_run(source):
+        if not force and self._has_multistep_run(source):
             logger.debug("Skipping current snapshot — multi-timestep run exists in DB")
             return
 
@@ -340,6 +345,83 @@ class WeatherIngestionService:
 
         except Exception as e:
             logger.error(f"Current ingestion failed: {e}")
+            conn.rollback()
+        finally:
+            conn.close()
+
+    def ingest_ice(self, force: bool = False):
+        """Fetch CMEMS ice concentration snapshot.
+
+        Skips if a complete ice run already exists in the DB (any timestep count).
+        """
+        source = "cmems_ice"
+        if not force and self._has_multistep_run(source):
+            logger.debug("Skipping ice snapshot — run exists in DB")
+            return
+
+        run_time = datetime.now(timezone.utc)
+
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+
+            cur.execute(
+                """INSERT INTO weather_forecast_runs
+                   (source, run_time, status, grid_resolution,
+                    lat_min, lat_max, lon_min, lon_max, forecast_hours)
+                   VALUES (%s, %s, 'ingesting', %s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (source, run_time) DO UPDATE
+                   SET status = 'ingesting', ingested_at = NOW()
+                   RETURNING id""",
+                (source, run_time, self.GRID_RESOLUTION,
+                 self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
+                 [0]),
+            )
+            run_id = cur.fetchone()[0]
+            conn.commit()
+
+            ice_data = self.copernicus_provider.fetch_ice_data(
+                self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
+            )
+            if ice_data is None:
+                cur.execute(
+                    "UPDATE weather_forecast_runs SET status = 'failed' WHERE id = %s",
+                    (run_id,),
+                )
+                conn.commit()
+                logger.warning("CMEMS ice fetch returned None")
+                return
+
+            lats_blob = self._compress(np.asarray(ice_data.lats))
+            lons_blob = self._compress(np.asarray(ice_data.lons))
+            rows = len(ice_data.lats)
+            cols = len(ice_data.lons)
+
+            arr = ice_data.ice_concentration if ice_data.ice_concentration is not None else ice_data.values
+            if arr is not None:
+                cur.execute(
+                    """INSERT INTO weather_grid_data
+                       (run_id, forecast_hour, parameter, lats, lons, data, shape_rows, shape_cols)
+                       VALUES (%s, 0, %s, %s, %s, %s, %s, %s)
+                       ON CONFLICT (run_id, forecast_hour, parameter)
+                       DO UPDATE SET data = EXCLUDED.data,
+                                    lats = EXCLUDED.lats,
+                                    lons = EXCLUDED.lons,
+                                    shape_rows = EXCLUDED.shape_rows,
+                                    shape_cols = EXCLUDED.shape_cols""",
+                    (run_id, "ice_siconc", lats_blob, lons_blob,
+                     self._compress(np.asarray(arr)), rows, cols),
+                )
+
+            cur.execute(
+                "UPDATE weather_forecast_runs SET status = 'complete' WHERE id = %s",
+                (run_id,),
+            )
+            conn.commit()
+            logger.info("CMEMS ice snapshot ingestion complete")
+
+        except Exception as e:
+            logger.error(f"Ice ingestion failed: {e}")
             conn.rollback()
         finally:
             conn.close()
@@ -527,6 +609,93 @@ class WeatherIngestionService:
 
         except Exception as e:
             logger.error(f"Current forecast frame ingestion failed: {e}")
+            conn.rollback()
+        finally:
+            conn.close()
+
+    def ingest_ice_forecast_frames(self, frames: dict):
+        """Store multi-timestep ice forecast frames into PostgreSQL.
+
+        Args:
+            frames: Dict mapping forecast_hour (int) -> WeatherData.
+                    Each WeatherData has ice_concentration (siconc).
+                    Expected hours: 0, 24, 48, ..., 216 (10 daily steps).
+        """
+        if not frames:
+            return
+
+        source = "cmems_ice"
+        run_time = datetime.now(timezone.utc)
+        forecast_hours = sorted(frames.keys())
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+
+            # Supersede any existing complete ice runs
+            cur.execute(
+                """UPDATE weather_forecast_runs SET status = 'superseded'
+                   WHERE source = %s AND status = 'complete'""",
+                (source,),
+            )
+
+            cur.execute(
+                """INSERT INTO weather_forecast_runs
+                   (source, run_time, status, grid_resolution,
+                    lat_min, lat_max, lon_min, lon_max, forecast_hours)
+                   VALUES (%s, %s, 'ingesting', %s, %s, %s, %s, %s, %s)
+                   RETURNING id""",
+                (source, run_time, 0.083,
+                 self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
+                 forecast_hours),
+            )
+            run_id = cur.fetchone()[0]
+            conn.commit()
+
+            ingested_count = 0
+            for fh in forecast_hours:
+                wd = frames[fh]
+                try:
+                    lats_blob = self._compress(np.asarray(wd.lats))
+                    lons_blob = self._compress(np.asarray(wd.lons))
+                    rows = len(wd.lats)
+                    cols = len(wd.lons)
+
+                    arr = wd.ice_concentration if wd.ice_concentration is not None else wd.values
+                    if arr is None:
+                        continue
+                    cur.execute(
+                        """INSERT INTO weather_grid_data
+                           (run_id, forecast_hour, parameter, lats, lons, data, shape_rows, shape_cols)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                           ON CONFLICT (run_id, forecast_hour, parameter)
+                           DO UPDATE SET data = EXCLUDED.data,
+                                        lats = EXCLUDED.lats,
+                                        lons = EXCLUDED.lons,
+                                        shape_rows = EXCLUDED.shape_rows,
+                                        shape_cols = EXCLUDED.shape_cols""",
+                        (run_id, fh, "ice_siconc", lats_blob, lons_blob,
+                         self._compress(np.asarray(arr)), rows, cols),
+                    )
+
+                    ingested_count += 1
+                    conn.commit()
+                except Exception as e:
+                    logger.error(f"Failed to ingest ice forecast f{fh:03d}: {e}")
+                    conn.rollback()
+
+            status = "complete" if ingested_count > 0 else "failed"
+            cur.execute(
+                "UPDATE weather_forecast_runs SET status = %s WHERE id = %s",
+                (status, run_id),
+            )
+            conn.commit()
+            logger.info(
+                f"Ice forecast DB ingestion {status}: "
+                f"{ingested_count}/{len(forecast_hours)} hours"
+            )
+
+        except Exception as e:
+            logger.error(f"Ice forecast frame ingestion failed: {e}")
             conn.rollback()
         finally:
             conn.close()

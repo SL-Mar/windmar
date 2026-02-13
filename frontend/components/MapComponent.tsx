@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import { Loader2 } from 'lucide-react';
-import { Position, WindFieldData, WaveFieldData, VelocityData, CreateZoneRequest, WaveForecastFrames } from '@/lib/api';
+import { Position, WindFieldData, WaveFieldData, VelocityData, CreateZoneRequest, WaveForecastFrames, IceForecastFrames, SstForecastFrames, VisForecastFrames, AllOptimizationResults, RouteVisibility, OptimizedRouteKey, ROUTE_STYLES } from '@/lib/api';
 
 // Dynamic imports for map components (client-side only)
 const MapContainer = dynamic(
@@ -53,15 +53,23 @@ const MapViewportProvider = dynamic(
   () => import('@/components/MapViewportProvider'),
   { ssr: false }
 );
+const FitBoundsHandler = dynamic(
+  () => import('@/components/FitBoundsHandler'),
+  { ssr: false }
+);
 const Polyline = dynamic(
   () => import('react-leaflet').then((mod) => mod.Polyline),
+  { ssr: false }
+);
+const Tooltip = dynamic(
+  () => import('react-leaflet').then((mod) => mod.Tooltip),
   { ssr: false }
 );
 
 const DEFAULT_CENTER: [number, number] = [45, 10];
 const DEFAULT_ZOOM = 5;
 
-export type WeatherLayer = 'wind' | 'waves' | 'currents' | 'none';
+export type WeatherLayer = 'wind' | 'waves' | 'currents' | 'ice' | 'visibility' | 'sst' | 'swell' | 'none';
 
 export interface MapComponentProps {
   waypoints: Position[];
@@ -83,10 +91,18 @@ export interface MapComponentProps {
   onForecastHourChange?: (hour: number, data: VelocityData[] | null) => void;
   onWaveForecastHourChange?: (hour: number, allFrames: WaveForecastFrames | null) => void;
   onCurrentForecastHourChange?: (hour: number, allFrames: any | null) => void;
-  optimizedWaypoints?: Position[];
+  onIceForecastHourChange?: (hour: number, allFrames: IceForecastFrames | null) => void;
+  onSwellForecastHourChange?: (hour: number, allFrames: WaveForecastFrames | null) => void;
+  onSstForecastHourChange?: (hour: number, allFrames: SstForecastFrames | null) => void;
+  onVisForecastHourChange?: (hour: number, allFrames: VisForecastFrames | null) => void;
+  allResults?: AllOptimizationResults;
+  routeVisibility?: RouteVisibility;
   onViewportChange?: (viewport: { bounds: { lat_min: number; lat_max: number; lon_min: number; lon_max: number }; zoom: number }) => void;
   viewportBounds?: { lat_min: number; lat_max: number; lon_min: number; lon_max: number } | null;
   weatherModelLabel?: string;
+  extendedWeatherData?: any;
+  fitBounds?: [[number, number], [number, number]] | null;
+  fitKey?: number;
   children?: React.ReactNode;
 }
 
@@ -110,10 +126,18 @@ export default function MapComponent({
   onForecastHourChange,
   onWaveForecastHourChange,
   onCurrentForecastHourChange,
-  optimizedWaypoints,
+  onIceForecastHourChange,
+  onSwellForecastHourChange,
+  onSstForecastHourChange,
+  onVisForecastHourChange,
+  allResults,
+  routeVisibility,
   onViewportChange,
   viewportBounds = null,
   weatherModelLabel,
+  extendedWeatherData = null,
+  fitBounds: fitBoundsProp = null,
+  fitKey = 0,
   children,
 }: MapComponentProps) {
   const [isMounted, setIsMounted] = useState(false);
@@ -152,6 +176,9 @@ export default function MapComponent({
         {/* Viewport tracker */}
         {onViewportChange && <MapViewportProvider onViewportChange={onViewportChange} />}
 
+        {/* Fit bounds handler */}
+        <FitBoundsHandler bounds={fitBoundsProp} fitKey={fitKey} />
+
         {/* Zone Layer */}
         {showZones && <ZoneLayer key={zoneKey} visible={showZones} visibleTypes={visibleZoneTypes} />}
 
@@ -186,6 +213,15 @@ export default function MapComponent({
           <VelocityParticleLayer data={currentVelocityData} type="currents" />
         )}
 
+        {/* Extended weather layers (SPEC-P1) */}
+        {(weatherLayer === 'ice' || weatherLayer === 'visibility' || weatherLayer === 'sst' || weatherLayer === 'swell') && extendedWeatherData && (
+          <WeatherGridLayer
+            mode={weatherLayer as 'ice' | 'visibility' | 'sst' | 'swell'}
+            extendedData={extendedWeatherData}
+            opacity={0.6}
+          />
+        )}
+
         {/* Wave Info Popup (click-to-inspect polar diagram) */}
         {weatherLayer === 'waves' && (
           <WaveInfoPopup
@@ -205,20 +241,29 @@ export default function MapComponent({
           waypoints={waypoints}
           onWaypointsChange={onWaypointsChange}
           isEditing={isEditing}
+          routeColor={routeVisibility?.original === false ? 'transparent' : undefined}
         />
 
-        {/* Optimized route overlay (green dashed) */}
-        {optimizedWaypoints && optimizedWaypoints.length >= 2 && (
-          <Polyline
-            positions={optimizedWaypoints.map(wp => [wp.lat, wp.lon] as [number, number])}
-            pathOptions={{
-              color: '#22c55e',
-              weight: 3,
-              opacity: 0.85,
-              dashArray: '8, 6',
-            }}
-          />
-        )}
+        {/* Optimized route overlays — dynamic loop over all 6 route keys */}
+        {allResults && routeVisibility && (Object.keys(ROUTE_STYLES) as OptimizedRouteKey[]).map(key => {
+          const result = allResults[key];
+          if (!routeVisibility[key] || !result?.waypoints?.length || result.waypoints.length < 2) return null;
+          const style = ROUTE_STYLES[key];
+          return (
+            <Polyline
+              key={key}
+              positions={result.waypoints.map(wp => [wp.lat, wp.lon] as [number, number])}
+              pathOptions={{
+                color: style.color,
+                weight: 3,
+                opacity: 0.85,
+                dashArray: style.dashArray,
+              }}
+            >
+              <Tooltip sticky>{style.label} route</Tooltip>
+            </Polyline>
+          );
+        })}
       </MapContainer>
 
       {/* Weather model watermark */}
@@ -241,7 +286,12 @@ export default function MapComponent({
           onForecastHourChange={onForecastHourChange}
           onWaveForecastHourChange={onWaveForecastHourChange}
           onCurrentForecastHourChange={onCurrentForecastHourChange}
-          layerType={weatherLayer === 'none' ? 'wind' : weatherLayer}
+          onIceForecastHourChange={onIceForecastHourChange}
+          onSwellForecastHourChange={onSwellForecastHourChange}
+          onSstForecastHourChange={onSstForecastHourChange}
+          onVisForecastHourChange={onVisForecastHourChange}
+          layerType={(['wind', 'waves', 'currents', 'ice', 'swell', 'sst', 'visibility'] as const).includes(weatherLayer as any) ? weatherLayer as any : 'wind'}
+          displayLayerName={{ wind: 'Wind Speed', waves: 'Waves', currents: 'Currents', ice: 'Ice', visibility: 'Visibility', sst: 'Sea Surface Temp', swell: 'Swell', none: undefined }[weatherLayer]}
           viewportBounds={viewportBounds}
         />
       )}

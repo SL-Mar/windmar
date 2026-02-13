@@ -213,7 +213,7 @@ class ExcelParser:
 
         elif field == "wind_direction":
             # Convert wind direction to degrees
-            val = str(value).upper()
+            val = str(value).upper().strip()
             direction_map = {
                 "N": 0,
                 "NNE": 22.5,
@@ -232,7 +232,13 @@ class ExcelParser:
                 "NW": 315,
                 "NNW": 337.5,
             }
-            return direction_map.get(val, float(value))
+            if val in direction_map:
+                return direction_map[val]
+            return float(value)
+
+        elif field == "condition":
+            # Return condition string as-is (not numeric)
+            return str(value)
 
         elif field == "wave_height":
             # Ensure in meters

@@ -57,6 +57,9 @@ htmlcov/
 *.crt
 *.secret
 
+# Backups
+docker/backup/backups/
+
 # OS
 .DS_Store
 Thumbs.db

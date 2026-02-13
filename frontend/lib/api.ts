@@ -20,6 +20,7 @@ const api = axios.create({
 export interface Position {
   lat: number;
   lon: number;
+  name?: string;
 }
 
 export interface WaypointData {
@@ -103,6 +104,36 @@ export interface WaveFieldData {
   };
 }
 
+// Extended weather field types (SPEC-P1)
+export interface GridFieldData {
+  parameter: string;
+  time: string;
+  bbox: { lat_min: number; lat_max: number; lon_min: number; lon_max: number };
+  resolution: number;
+  nx: number;
+  ny: number;
+  lats: number[];
+  lons: number[];
+  data: number[][];
+  unit: string;
+  ocean_mask?: boolean[][];
+  ocean_mask_lats?: number[];
+  ocean_mask_lons?: number[];
+  source?: string;
+  colorscale?: { min: number; max: number; colors: string[] };
+}
+
+export interface SwellFieldData extends GridFieldData {
+  has_decomposition: boolean;
+  total_hs: number[][];
+  swell_hs: number[][] | null;
+  swell_tp: number[][] | null;
+  swell_dir: number[][] | null;
+  windsea_hs: number[][] | null;
+  windsea_tp: number[][] | null;
+  windsea_dir: number[][] | null;
+}
+
 // Wave forecast types
 export interface WaveForecastFrame {
   data: number[][];
@@ -142,6 +173,67 @@ export interface CurrentForecastFrames {
   ny: number;
   nx: number;
   frames: Record<string, CurrentForecastFrame>;
+}
+
+export interface IceForecastFrame {
+  data: number[][];
+}
+
+export interface IceForecastFrames {
+  run_time: string;
+  total_hours: number;
+  cached_hours: number;
+  source?: string;
+  lats: number[];
+  lons: number[];
+  ny: number;
+  nx: number;
+  ocean_mask?: boolean[][];
+  ocean_mask_lats?: number[];
+  ocean_mask_lons?: number[];
+  frames: Record<string, IceForecastFrame>;
+}
+
+// SST forecast types
+export interface SstForecastFrame {
+  data: number[][];
+}
+
+export interface SstForecastFrames {
+  run_time: string;
+  total_hours: number;
+  cached_hours: number;
+  source?: string;
+  lats: number[];
+  lons: number[];
+  ny: number;
+  nx: number;
+  ocean_mask?: boolean[][];
+  ocean_mask_lats?: number[];
+  ocean_mask_lons?: number[];
+  colorscale?: { min: number; max: number; colors: string[] };
+  frames: Record<string, SstForecastFrame>;
+}
+
+// Visibility forecast types
+export interface VisForecastFrame {
+  data: number[][];
+}
+
+export interface VisForecastFrames {
+  run_time: string;
+  total_hours: number;
+  cached_hours: number;
+  source?: string;
+  lats: number[];
+  lons: number[];
+  ny: number;
+  nx: number;
+  ocean_mask?: boolean[][];
+  ocean_mask_lats?: number[];
+  ocean_mask_lons?: number[];
+  colorscale?: { min: number; max: number; colors: string[] };
+  frames: Record<string, VisForecastFrame>;
 }
 
 export interface VelocityData {
@@ -296,6 +388,10 @@ export interface OptimizationRequest {
   baseline_fuel_mt?: number;
   baseline_time_hours?: number;
   baseline_distance_nm?: number;
+  // Engine selection (astar or visir)
+  engine?: 'astar' | 'visir';
+  // Safety weight: 0=fuel optimal, 1=safety priority
+  safety_weight?: number;
 }
 
 export interface WeatherProvenance {
@@ -375,7 +471,52 @@ export interface OptimizationResponse {
   grid_resolution_deg: number;
   cells_explored: number;
   optimization_time_ms: number;
+  // Engine identifier
+  engine?: string;
 }
+
+// Dual-engine types
+export type EngineType = 'astar' | 'visir';
+
+export type OptimizedRouteKey =
+  | 'astar_fuel' | 'astar_balanced' | 'astar_safety'
+  | 'visir_fuel' | 'visir_balanced' | 'visir_safety';
+
+export type AllOptimizationResults = Record<OptimizedRouteKey, OptimizationResponse | null>;
+
+export interface RouteVisibility {
+  original: boolean;
+  astar_fuel: boolean;
+  astar_balanced: boolean;
+  astar_safety: boolean;
+  visir_fuel: boolean;
+  visir_balanced: boolean;
+  visir_safety: boolean;
+}
+
+export const ROUTE_STYLES: Record<OptimizedRouteKey, { color: string; dashArray: string; label: string }> = {
+  astar_fuel:     { color: '#22c55e', dashArray: '8, 4',  label: 'A* Fuel' },
+  astar_balanced: { color: '#4ade80', dashArray: '12, 6', label: 'A* Balanced' },
+  astar_safety:   { color: '#86efac', dashArray: '4, 4',  label: 'A* Safety' },
+  visir_fuel:     { color: '#f97316', dashArray: '8, 4',  label: 'VISIR Fuel' },
+  visir_balanced: { color: '#fb923c', dashArray: '12, 6', label: 'VISIR Balanced' },
+  visir_safety:   { color: '#fdba74', dashArray: '4, 4',  label: 'VISIR Safety' },
+};
+
+export const DEFAULT_ROUTE_VISIBILITY: RouteVisibility = {
+  original: true,
+  astar_fuel: true,
+  astar_balanced: false,
+  astar_safety: false,
+  visir_fuel: true,
+  visir_balanced: false,
+  visir_safety: false,
+};
+
+export const EMPTY_ALL_RESULTS: AllOptimizationResults = {
+  astar_fuel: null, astar_balanced: null, astar_safety: null,
+  visir_fuel: null, visir_balanced: null, visir_safety: null,
+};
 
 // Vessel types
 export interface VesselSpecs {
@@ -710,6 +851,19 @@ export const apiClient = {
   // Weather API (Layer 1)
   // -------------------------------------------------------------------------
 
+  async ensureAllWeatherData(params: {
+    lat_min?: number;
+    lat_max?: number;
+    lon_min?: number;
+    lon_max?: number;
+    force?: boolean;
+  } = {}): Promise<{ sources: Record<string, string>; elapsed_ms: number }> {
+    const response = await api.post('/api/weather/ensure-all', params, {
+      timeout: 300000, // 5 min — external API fetches can be slow
+    });
+    return response.data;
+  },
+
   async getWindField(params: {
     lat_min?: number;
     lat_max?: number;
@@ -717,6 +871,7 @@ export const apiClient = {
     lon_max?: number;
     resolution?: number;
     time?: string;
+    db_only?: boolean;
   } = {}): Promise<WindFieldData> {
     const response = await api.get<WindFieldData>('/api/weather/wind', { params });
     return response.data;
@@ -730,6 +885,7 @@ export const apiClient = {
     resolution?: number;
     time?: string;
     forecast_hour?: number;
+    db_only?: boolean;
   } = {}): Promise<VelocityData[]> {
     const response = await api.get<VelocityData[]>('/api/weather/wind/velocity', { params });
     return response.data;
@@ -828,6 +984,99 @@ export const apiClient = {
     return response.data;
   },
 
+  // Ice forecast
+  async getIceForecastStatus(params: {
+    lat_min?: number;
+    lat_max?: number;
+    lon_min?: number;
+    lon_max?: number;
+  } = {}): Promise<ForecastStatus> {
+    const response = await api.get<ForecastStatus>('/api/weather/forecast/ice/status', { params });
+    return response.data;
+  },
+
+  async triggerIceForecastPrefetch(params: {
+    lat_min?: number;
+    lat_max?: number;
+    lon_min?: number;
+    lon_max?: number;
+  } = {}): Promise<{ status: string; message: string }> {
+    const response = await api.post('/api/weather/forecast/ice/prefetch', null, { params });
+    return response.data;
+  },
+
+  async getIceForecastFrames(params: {
+    lat_min?: number;
+    lat_max?: number;
+    lon_min?: number;
+    lon_max?: number;
+  } = {}): Promise<IceForecastFrames> {
+    const response = await api.get<IceForecastFrames>('/api/weather/forecast/ice/frames', { params });
+    return response.data;
+  },
+
+  // SST forecast
+  async getSstForecastStatus(params: {
+    lat_min?: number;
+    lat_max?: number;
+    lon_min?: number;
+    lon_max?: number;
+  } = {}): Promise<ForecastStatus> {
+    const response = await api.get<ForecastStatus>('/api/weather/forecast/sst/status', { params });
+    return response.data;
+  },
+
+  async triggerSstForecastPrefetch(params: {
+    lat_min?: number;
+    lat_max?: number;
+    lon_min?: number;
+    lon_max?: number;
+  } = {}): Promise<{ status: string; message: string }> {
+    const response = await api.post('/api/weather/forecast/sst/prefetch', null, { params });
+    return response.data;
+  },
+
+  async getSstForecastFrames(params: {
+    lat_min?: number;
+    lat_max?: number;
+    lon_min?: number;
+    lon_max?: number;
+  } = {}): Promise<SstForecastFrames> {
+    const response = await api.get<SstForecastFrames>('/api/weather/forecast/sst/frames', { params });
+    return response.data;
+  },
+
+  // Visibility forecast
+  async getVisForecastStatus(params: {
+    lat_min?: number;
+    lat_max?: number;
+    lon_min?: number;
+    lon_max?: number;
+  } = {}): Promise<ForecastStatus> {
+    const response = await api.get<ForecastStatus>('/api/weather/forecast/visibility/status', { params });
+    return response.data;
+  },
+
+  async triggerVisForecastPrefetch(params: {
+    lat_min?: number;
+    lat_max?: number;
+    lon_min?: number;
+    lon_max?: number;
+  } = {}): Promise<{ status: string; message: string }> {
+    const response = await api.post('/api/weather/forecast/visibility/prefetch', null, { params });
+    return response.data;
+  },
+
+  async getVisForecastFrames(params: {
+    lat_min?: number;
+    lat_max?: number;
+    lon_min?: number;
+    lon_max?: number;
+  } = {}): Promise<VisForecastFrames> {
+    const response = await api.get<VisForecastFrames>('/api/weather/forecast/visibility/frames', { params });
+    return response.data;
+  },
+
   async getWaveField(params: {
     lat_min?: number;
     lat_max?: number;
@@ -835,6 +1084,7 @@ export const apiClient = {
     lon_max?: number;
     resolution?: number;
     time?: string;
+    db_only?: boolean;
   } = {}): Promise<WaveFieldData> {
     const response = await api.get<WaveFieldData>('/api/weather/waves', { params });
     return response.data;
@@ -847,6 +1097,7 @@ export const apiClient = {
     lon_max?: number;
     resolution?: number;
     time?: string;
+    db_only?: boolean;
   } = {}): Promise<VelocityData[]> {
     const response = await api.get<VelocityData[]>('/api/weather/currents/velocity', { params });
     return response.data;
@@ -856,6 +1107,37 @@ export const apiClient = {
     const params: { lat: number; lon: number; time?: string } = { lat, lon };
     if (time) params.time = time;
     const response = await api.get<PointWeather>('/api/weather/point', { params });
+    return response.data;
+  },
+
+  // Extended weather fields (SPEC-P1)
+  async getSstField(params: { lat_min?: number; lat_max?: number; lon_min?: number; lon_max?: number; resolution?: number } = {}): Promise<GridFieldData> {
+    const response = await api.get<GridFieldData>('/api/weather/sst', { params });
+    return response.data;
+  },
+
+  async getVisibilityField(params: { lat_min?: number; lat_max?: number; lon_min?: number; lon_max?: number; resolution?: number } = {}): Promise<GridFieldData> {
+    const response = await api.get<GridFieldData>('/api/weather/visibility', { params });
+    return response.data;
+  },
+
+  async getIceField(params: { lat_min?: number; lat_max?: number; lon_min?: number; lon_max?: number; resolution?: number; db_only?: boolean } = {}): Promise<GridFieldData> {
+    const response = await api.get<GridFieldData>('/api/weather/ice', { params });
+    return response.data;
+  },
+
+  async getWeatherFreshness(): Promise<{
+    status: string;
+    age_hours: number | null;
+    color: string;
+    message?: string;
+  }> {
+    const response = await api.get('/api/weather/freshness');
+    return response.data;
+  },
+
+  async getSwellField(params: { lat_min?: number; lat_max?: number; lon_min?: number; lon_max?: number; resolution?: number } = {}): Promise<SwellFieldData> {
+    const response = await api.get<SwellFieldData>('/api/weather/swell', { params });
     return response.data;
   },
 
@@ -912,7 +1194,9 @@ export const apiClient = {
   // -------------------------------------------------------------------------
 
   async optimizeRoute(request: OptimizationRequest): Promise<OptimizationResponse> {
-    const response = await api.post<OptimizationResponse>('/api/optimize/route', request);
+    const response = await api.post<OptimizationResponse>('/api/optimize/route', request, {
+      timeout: 180000, // 3 min timeout per engine (fine grids on long routes)
+    });
     return response.data;
   },
 
@@ -979,6 +1263,15 @@ export const apiClient = {
     const formData = new FormData();
     formData.append('file', file);
     const response = await api.post('/api/vessel/noon-reports/upload-csv', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return response.data;
+  },
+
+  async uploadNoonReportsExcel(file: File): Promise<{ status: string; imported: number; total_reports: number }> {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await api.post('/api/vessel/noon-reports/upload-excel', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
     });
     return response.data;

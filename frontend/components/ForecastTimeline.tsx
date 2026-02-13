@@ -2,10 +2,10 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Play, Pause, X, Clock, Loader2, Info } from 'lucide-react';
-import { apiClient, VelocityData, ForecastFrames, WaveForecastFrames, WaveForecastFrame, CurrentForecastFrames } from '@/lib/api';
+import { apiClient, VelocityData, ForecastFrames, WaveForecastFrames, WaveForecastFrame, CurrentForecastFrames, IceForecastFrames, SstForecastFrames, VisForecastFrames } from '@/lib/api';
 import { debugLog } from '@/lib/debugLog';
 
-type LayerType = 'wind' | 'waves' | 'currents';
+type LayerType = 'wind' | 'waves' | 'currents' | 'ice' | 'swell' | 'sst' | 'visibility';
 
 export interface ViewportBounds {
   lat_min: number;
@@ -22,14 +22,32 @@ interface ForecastTimelineProps {
   onWaveForecastHourChange?: (hour: number, frame: WaveForecastFrames | null) => void;
   /** Callback for current forecast frame changes */
   onCurrentForecastHourChange?: (hour: number, frame: CurrentForecastFrames | null) => void;
+  /** Callback for ice forecast frame changes */
+  onIceForecastHourChange?: (hour: number, frame: IceForecastFrames | null) => void;
+  /** Callback for swell forecast frame changes (reuses wave frames) */
+  onSwellForecastHourChange?: (hour: number, frame: WaveForecastFrames | null) => void;
+  /** Callback for SST forecast frame changes */
+  onSstForecastHourChange?: (hour: number, frame: SstForecastFrames | null) => void;
+  /** Callback for visibility forecast frame changes */
+  onVisForecastHourChange?: (hour: number, frame: VisForecastFrames | null) => void;
   layerType?: LayerType;
+  /** Display name override — shows the actual weather layer name in the title */
+  displayLayerName?: string;
   viewportBounds?: ViewportBounds | null;
   dataTimestamp?: string | null;
 }
 
-const FORECAST_HOURS = Array.from({ length: 41 }, (_, i) => i * 3); // 0,3,6,...,120
+// Default forecast hours (used until actual frame data arrives from DB)
+const DEFAULT_FORECAST_HOURS = Array.from({ length: 41 }, (_, i) => i * 3); // 0,3,6,...,120
+const DEFAULT_ICE_FORECAST_HOURS = Array.from({ length: 10 }, (_, i) => i * 24); // 0,24,48,...,216
 const SPEED_OPTIONS = [1, 2, 4];
 const SPEED_INTERVAL: Record<number, number> = { 1: 2000, 2: 1000, 4: 500 };
+
+/** Extract sorted numeric hours from frame keys returned by the backend. */
+function deriveHoursFromFrames(frames: Record<string, unknown>): number[] {
+  const hours = Object.keys(frames).map(Number).filter(n => !isNaN(n)).sort((a, b) => a - b);
+  return hours.length > 0 ? hours : [];
+}
 
 export default function ForecastTimeline({
   visible,
@@ -37,22 +55,45 @@ export default function ForecastTimeline({
   onForecastHourChange,
   onWaveForecastHourChange,
   onCurrentForecastHourChange,
+  onIceForecastHourChange,
+  onSwellForecastHourChange,
+  onSstForecastHourChange,
+  onVisForecastHourChange,
   layerType = 'wind',
+  displayLayerName,
   viewportBounds,
   dataTimestamp,
 }: ForecastTimelineProps) {
   const isWindMode = layerType === 'wind';
   const isWaveMode = layerType === 'waves';
   const isCurrentMode = layerType === 'currents';
-  const hasForecast = isWindMode || isWaveMode || isCurrentMode;
+  const isIceMode = layerType === 'ice';
+  const isSwellMode = layerType === 'swell';
+  const isSstMode = layerType === 'sst';
+  const isVisMode = layerType === 'visibility';
+  const hasForecast = isWindMode || isWaveMode || isCurrentMode || isIceMode || isSwellMode || isSstMode || isVisMode;
 
   const [currentHour, setCurrentHour] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [speed, setSpeed] = useState(1);
   const [isLoading, setIsLoading] = useState(false);
-  const [loadProgress, setLoadProgress] = useState({ cached: 0, total: 41 });
+  const [loadProgress, setLoadProgress] = useState({ cached: 0, total: 0 });
   const [runTime, setRunTime] = useState<string | null>(null);
   const [prefetchComplete, setPrefetchComplete] = useState(false);
+
+  // Dynamic hours derived from actual DB/API response (replaces hardcoded constants)
+  const [availableHours, setAvailableHours] = useState<number[]>([]);
+  const availableHoursRef = useRef<number[]>([]);
+  useEffect(() => { availableHoursRef.current = availableHours; }, [availableHours]);
+
+  // Reset available hours when layer changes so stale data from a previous layer doesn't persist
+  useEffect(() => { setAvailableHours([]); setCurrentHour(0); }, [layerType]);
+
+  // Effective hours: use DB-derived if available, else defaults
+  const defaultHours = isIceMode ? DEFAULT_ICE_FORECAST_HOURS : DEFAULT_FORECAST_HOURS;
+  const activeHours = availableHours.length > 0 ? availableHours : defaultHours;
+  const sliderMax = activeHours.length > 0 ? activeHours[activeHours.length - 1] : 0;
+  const sliderStep = activeHours.length >= 2 ? activeHours[1] - activeHours[0] : (isIceMode ? 24 : 3);
 
   // Wind frames
   const [windFrames, setWindFrames] = useState<Record<string, VelocityData[]>>({});
@@ -66,8 +107,22 @@ export default function ForecastTimeline({
   const [currentFrameData, setCurrentFrameData] = useState<CurrentForecastFrames | null>(null);
   const currentFrameDataRef = useRef<CurrentForecastFrames | null>(null);
 
-  const playIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Ice frames
+  const [iceFrameData, setIceFrameData] = useState<IceForecastFrames | null>(null);
+  const iceFrameDataRef = useRef<IceForecastFrames | null>(null);
+
+  // SST frames
+  const [sstFrameData, setSstFrameData] = useState<SstForecastFrames | null>(null);
+  const sstFrameDataRef = useRef<SstForecastFrames | null>(null);
+
+  // Visibility frames
+  const [visFrameData, setVisFrameData] = useState<VisForecastFrames | null>(null);
+  const visFrameDataRef = useRef<VisForecastFrames | null>(null);
+
+  const playRafRef = useRef<number | null>(null);
+  const playLastTickRef = useRef(0);
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const sliderRafRef = useRef<number | null>(null);
 
   // Snapshot viewport bounds into a ref — never let it revert to null once set
   const boundsRef = useRef<ViewportBounds | null>(viewportBounds ?? null);
@@ -76,19 +131,71 @@ export default function ForecastTimeline({
     if (viewportBounds) boundsRef.current = viewportBounds;
   }, [viewportBounds]);
 
+  // Bounds key for cache invalidation: coarse 10°-rounded viewport bounds.
+  // Only triggers re-fetch when the user pans to a truly different ocean region,
+  // NOT on every small pan (which would miss the backend's per-bounds frame cache).
+  const BOUNDS_GRID = 10; // degrees
+  const roundBounds = (v: number) => Math.floor(v / BOUNDS_GRID) * BOUNDS_GRID;
+
+  // Pad viewport bounds OUT to grid cell edges so fetched data always covers the
+  // full grid cell.  This prevents truncated overlays when panning within a cell.
+  const paddedBounds = () => {
+    const b = boundsRef.current;
+    if (!b) return {};
+    return {
+      lat_min: Math.floor(b.lat_min / BOUNDS_GRID) * BOUNDS_GRID,
+      lat_max: Math.ceil(b.lat_max / BOUNDS_GRID) * BOUNDS_GRID,
+      lon_min: Math.floor(b.lon_min / BOUNDS_GRID) * BOUNDS_GRID,
+      lon_max: Math.ceil(b.lon_max / BOUNDS_GRID) * BOUNDS_GRID,
+    };
+  };
+  const [boundsKey, setBoundsKey] = useState('');
+  const activeBoundsKeyRef = useRef<string>('');
+  useEffect(() => {
+    if (!viewportBounds) return;
+    const key = `${roundBounds(viewportBounds.lat_min)}_${roundBounds(viewportBounds.lat_max)}_${roundBounds(viewportBounds.lon_min)}_${roundBounds(viewportBounds.lon_max)}`;
+    if (activeBoundsKeyRef.current && key !== activeBoundsKeyRef.current) {
+      debugLog('info', 'TIMELINE', `Region changed: ${activeBoundsKeyRef.current} → ${key} — clearing frame caches`);
+      // Clear all client-side frame caches
+      setWindFrames({});
+      windFramesRef.current = {};
+      setWaveFrameData(null);
+      waveFrameDataRef.current = null;
+      setCurrentFrameData(null);
+      currentFrameDataRef.current = null;
+      setIceFrameData(null);
+      iceFrameDataRef.current = null;
+      setSstFrameData(null);
+      sstFrameDataRef.current = null;
+      setVisFrameData(null);
+      visFrameDataRef.current = null;
+      // Reset prefetch state so effects re-trigger
+      setPrefetchComplete(false);
+      setAvailableHours([]);
+      setCurrentHour(0);
+    }
+    activeBoundsKeyRef.current = key;
+    setBoundsKey(key);
+  }, [viewportBounds]);
+
   // Keep refs in sync
   useEffect(() => { windFramesRef.current = windFrames; }, [windFrames]);
   useEffect(() => { waveFrameDataRef.current = waveFrameData; }, [waveFrameData]);
   useEffect(() => { currentFrameDataRef.current = currentFrameData; }, [currentFrameData]);
+  useEffect(() => { iceFrameDataRef.current = iceFrameData; }, [iceFrameData]);
+  useEffect(() => { sstFrameDataRef.current = sstFrameData; }, [sstFrameData]);
+  useEffect(() => { visFrameDataRef.current = visFrameData; }, [visFrameData]);
 
   // ------------------------------------------------------------------
   // Wind forecast: load all frames
   // ------------------------------------------------------------------
-  const loadWindFrames = useCallback(async () => {
+  const loadWindFrames = useCallback(async (bounds?: ViewportBounds | null) => {
     try {
-      const bp = boundsRef.current ?? {};
+      // Use the provided bounds (from prefetch) to avoid mismatch if the user panned
+      const bp = bounds ?? boundsRef.current ?? {};
       const data: ForecastFrames = await apiClient.getForecastFrames(bp);
       setWindFrames(data.frames);
+      setAvailableHours(deriveHoursFromFrames(data.frames));
       setRunTime(`${data.run_date} ${data.run_hour}Z`);
       setPrefetchComplete(true);
       setIsLoading(false);
@@ -106,7 +213,7 @@ export default function ForecastTimeline({
     try {
       debugLog('info', 'WAVE', 'Loading wave forecast frames from API...');
       const t0 = performance.now();
-      const bp = boundsRef.current ?? {};
+      const bp = paddedBounds();
       const data: WaveForecastFrames = await apiClient.getWaveForecastFrames(bp);
       const dt = ((performance.now() - t0) / 1000).toFixed(1);
       const frameKeys = Object.keys(data.frames);
@@ -122,6 +229,7 @@ export default function ForecastTimeline({
         }
       }
       setWaveFrameData(data);
+      setAvailableHours(deriveHoursFromFrames(data.frames));
       const rt = data.run_time;
       if (rt) {
         try {
@@ -151,8 +259,17 @@ export default function ForecastTimeline({
   useEffect(() => {
     if (!visible || !isWindMode || !boundsRef.current) return;
 
+    // Client-side cache hit — restore UI state instantly, skip network
+    if (Object.keys(windFramesRef.current).length > 0) {
+      setAvailableHours(deriveHoursFromFrames(windFramesRef.current));
+      setPrefetchComplete(true);
+      setIsLoading(false);
+      if (windFramesRef.current['0']) onForecastHourChange(0, windFramesRef.current['0']);
+      return;
+    }
+
     let cancelled = false;
-    const bp = boundsRef.current;
+    const bp = paddedBounds();
 
     const start = async () => {
       setIsLoading(true);
@@ -167,12 +284,18 @@ export default function ForecastTimeline({
             setRunTime(`${st.run_date} ${st.run_hour}Z`);
             if (st.complete || st.cached_hours === st.total_hours) {
               if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
-              await loadWindFrames();
+              await loadWindFrames(bp);
+            } else if (!st.prefetch_running && st.cached_hours === 0) {
+              if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
+              debugLog('info', 'WIND', 'Status shows 0 cached, prefetch idle — loading frames directly');
+              await loadWindFrames(bp);
             }
           } catch (e) { console.error('Wind forecast poll failed:', e); }
         };
         await poll();
-        pollIntervalRef.current = setInterval(poll, 3000);
+        if (!cancelled && pollIntervalRef.current === null && !prefetchComplete) {
+          pollIntervalRef.current = setInterval(poll, 3000);
+        }
       } catch (e) {
         console.error('Wind forecast prefetch trigger failed:', e);
         setIsLoading(false);
@@ -181,44 +304,25 @@ export default function ForecastTimeline({
 
     start();
     return () => { cancelled = true; if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; } };
-  }, [visible, isWindMode, hasBounds, loadWindFrames]);
+  }, [visible, isWindMode, hasBounds, boundsKey, loadWindFrames]);
 
   // ------------------------------------------------------------------
-  // Wave prefetch effect
+  // Wave prefetch effect — loads frames directly (backend extracts on-the-fly)
   // ------------------------------------------------------------------
   useEffect(() => {
     if (!visible || !isWaveMode || !boundsRef.current) return;
-
-    let cancelled = false;
-    const bp = boundsRef.current;
-
-    const start = async () => {
-      setIsLoading(true);
-      setPrefetchComplete(false);
-      try {
-        await apiClient.triggerWaveForecastPrefetch(bp);
-        const poll = async () => {
-          if (cancelled) return;
-          try {
-            const st = await apiClient.getWaveForecastStatus(bp);
-            setLoadProgress({ cached: st.cached_hours, total: st.total_hours });
-            if (st.complete || st.cached_hours === st.total_hours) {
-              if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
-              await loadWaveFrames();
-            }
-          } catch (e) { console.error('Wave forecast poll failed:', e); }
-        };
-        await poll();
-        pollIntervalRef.current = setInterval(poll, 5000); // wave download is slower, poll less often
-      } catch (e) {
-        console.error('Wave forecast prefetch trigger failed:', e);
-        setIsLoading(false);
-      }
-    };
-
-    start();
-    return () => { cancelled = true; if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; } };
-  }, [visible, isWaveMode, hasBounds, loadWaveFrames]);
+    if (waveFrameDataRef.current) {
+      const data = waveFrameDataRef.current;
+      setAvailableHours(deriveHoursFromFrames(data.frames));
+      setPrefetchComplete(true);
+      setIsLoading(false);
+      if (data.frames['0'] && onWaveForecastHourChange) onWaveForecastHourChange(0, data);
+      return;
+    }
+    setIsLoading(true);
+    setPrefetchComplete(false);
+    loadWaveFrames();
+  }, [visible, isWaveMode, hasBounds, boundsKey, loadWaveFrames]);
 
   // ------------------------------------------------------------------
   // Current forecast: load all frames
@@ -227,12 +331,13 @@ export default function ForecastTimeline({
     try {
       debugLog('info', 'CURRENT', 'Loading current forecast frames from API...');
       const t0 = performance.now();
-      const bp = boundsRef.current ?? {};
+      const bp = paddedBounds();
       const data: CurrentForecastFrames = await apiClient.getCurrentForecastFrames(bp);
       const dt = ((performance.now() - t0) / 1000).toFixed(1);
       const frameKeys = Object.keys(data.frames);
       debugLog('info', 'CURRENT', `Loaded ${frameKeys.length} frames in ${dt}s, grid=${data.ny}x${data.nx}`);
       setCurrentFrameData(data);
+      setAvailableHours(deriveHoursFromFrames(data.frames));
       if (data.run_time) {
         try {
           const d = new Date(data.run_time);
@@ -261,113 +366,371 @@ export default function ForecastTimeline({
   useEffect(() => {
     if (!visible || !isCurrentMode || !boundsRef.current) return;
 
-    let cancelled = false;
-    const bp = boundsRef.current;
+    if (currentFrameDataRef.current) {
+      const data = currentFrameDataRef.current;
+      setAvailableHours(deriveHoursFromFrames(data.frames));
+      setPrefetchComplete(true);
+      setIsLoading(false);
+      if (data.frames['0'] && onCurrentForecastHourChange) onCurrentForecastHourChange(0, data);
+      return;
+    }
+    setIsLoading(true);
+    setPrefetchComplete(false);
+    loadCurrentFrames();
+  }, [visible, isCurrentMode, hasBounds, boundsKey, loadCurrentFrames]);
 
-    const start = async () => {
-      setIsLoading(true);
-      setPrefetchComplete(false);
-      debugLog('info', 'CURRENT', 'Triggering current forecast prefetch...');
-      try {
-        await apiClient.triggerCurrentForecastPrefetch(bp);
-        const poll = async () => {
-          if (cancelled) return;
-          try {
-            const st = await apiClient.getCurrentForecastStatus(bp);
-            setLoadProgress({ cached: st.cached_hours, total: st.total_hours });
-            if (st.complete || st.cached_hours === st.total_hours) {
-              if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
-              await loadCurrentFrames();
-            }
-          } catch (e) { debugLog('error', 'CURRENT', `Current forecast poll failed: ${e}`); }
-        };
-        await poll();
-        pollIntervalRef.current = setInterval(poll, 5000);
-      } catch (e) {
-        debugLog('error', 'CURRENT', `Current forecast prefetch trigger failed: ${e}`);
-        setIsLoading(false);
+  // ------------------------------------------------------------------
+  // Ice forecast: load all frames
+  // ------------------------------------------------------------------
+  const loadIceFrames = useCallback(async () => {
+    try {
+      debugLog('info', 'ICE', 'Loading ice forecast frames from API...');
+      const t0 = performance.now();
+      const bp = paddedBounds();
+      const data: IceForecastFrames = await apiClient.getIceForecastFrames(bp);
+      const dt = ((performance.now() - t0) / 1000).toFixed(1);
+      const frameKeys = Object.keys(data.frames);
+      debugLog('info', 'ICE', `Loaded ${frameKeys.length} frames in ${dt}s, grid=${data.ny}x${data.nx}`);
+      setIceFrameData(data);
+      setAvailableHours(deriveHoursFromFrames(data.frames));
+      if (data.run_time) {
+        try {
+          const d = new Date(data.run_time);
+          setRunTime(
+            `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')} ${String(d.getUTCHours()).padStart(2, '0')}Z`
+          );
+        } catch {
+          setRunTime(data.run_time);
+        }
       }
-    };
+      setPrefetchComplete(true);
+      setIsLoading(false);
+      if (data.frames['0'] && onIceForecastHourChange) {
+        debugLog('info', 'ICE', 'Setting initial ice frame T+0h');
+        onIceForecastHourChange(0, data);
+      }
+    } catch (e) {
+      debugLog('error', 'ICE', `Failed to load ice forecast frames: ${e}`);
+      setIsLoading(false);
+    }
+  }, [onIceForecastHourChange]);
 
-    start();
-    return () => { cancelled = true; if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; } };
-  }, [visible, isCurrentMode, hasBounds, loadCurrentFrames]);
+  // ------------------------------------------------------------------
+  // Ice prefetch effect
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    if (!visible || !isIceMode || !boundsRef.current) return;
+
+    if (iceFrameDataRef.current) {
+      const data = iceFrameDataRef.current;
+      setAvailableHours(deriveHoursFromFrames(data.frames));
+      setPrefetchComplete(true);
+      setIsLoading(false);
+      if (data.frames['0'] && onIceForecastHourChange) onIceForecastHourChange(0, data);
+      return;
+    }
+    setIsLoading(true);
+    setPrefetchComplete(false);
+    loadIceFrames();
+  }, [visible, isIceMode, hasBounds, boundsKey, loadIceFrames]);
+
+  // ------------------------------------------------------------------
+  // Swell prefetch effect (reuses wave data — swell is embedded in wave frames)
+  // Loads wave frames into cache but fires onSwellForecastHourChange (NOT wave callback)
+  // ------------------------------------------------------------------
+  const loadSwellFrames = useCallback(async () => {
+    try {
+      debugLog('info', 'SWELL', 'Loading swell (wave) forecast frames from API...');
+      const t0 = performance.now();
+      const bp = paddedBounds();
+      const data: WaveForecastFrames = await apiClient.getWaveForecastFrames(bp);
+      const dt = ((performance.now() - t0) / 1000).toFixed(1);
+      const frameKeys = Object.keys(data.frames);
+      debugLog('info', 'SWELL', `Loaded ${frameKeys.length} frames in ${dt}s, grid=${data.ny}x${data.nx}`);
+      setWaveFrameData(data);
+      setAvailableHours(deriveHoursFromFrames(data.frames));
+      setPrefetchComplete(true);
+      setIsLoading(false);
+      if (data.frames['0'] && onSwellForecastHourChange) {
+        debugLog('info', 'SWELL', 'Setting initial swell frame T+0h');
+        onSwellForecastHourChange(0, data);
+      }
+    } catch (e) {
+      debugLog('error', 'SWELL', `Failed to load swell forecast frames: ${e}`);
+      setIsLoading(false);
+    }
+  }, [onSwellForecastHourChange]);
+
+  useEffect(() => {
+    if (!visible || !isSwellMode || !boundsRef.current) return;
+
+    if (waveFrameDataRef.current) {
+      const data = waveFrameDataRef.current;
+      setAvailableHours(deriveHoursFromFrames(data.frames));
+      setPrefetchComplete(true);
+      setIsLoading(false);
+      if (data.frames['0'] && onSwellForecastHourChange) onSwellForecastHourChange(0, data);
+      return;
+    }
+    setIsLoading(true);
+    setPrefetchComplete(false);
+    loadSwellFrames();
+  }, [visible, isSwellMode, hasBounds, boundsKey, loadSwellFrames]);
+
+  // ------------------------------------------------------------------
+  // SST forecast: load all frames
+  // ------------------------------------------------------------------
+  const loadSstFrames = useCallback(async () => {
+    try {
+      debugLog('info', 'SST', 'Loading SST forecast frames from API...');
+      const t0 = performance.now();
+      const bp = paddedBounds();
+      const data: SstForecastFrames = await apiClient.getSstForecastFrames(bp);
+      const dt = ((performance.now() - t0) / 1000).toFixed(1);
+      const frameKeys = Object.keys(data.frames);
+      debugLog('info', 'SST', `Loaded ${frameKeys.length} frames in ${dt}s, grid=${data.ny}x${data.nx}`);
+      setSstFrameData(data);
+      setAvailableHours(deriveHoursFromFrames(data.frames));
+      if (data.run_time) {
+        try {
+          const d = new Date(data.run_time);
+          setRunTime(
+            `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')} ${String(d.getUTCHours()).padStart(2, '0')}Z`
+          );
+        } catch {
+          setRunTime(data.run_time);
+        }
+      }
+      setPrefetchComplete(true);
+      setIsLoading(false);
+      if (data.frames['0'] && onSstForecastHourChange) {
+        debugLog('info', 'SST', 'Setting initial SST frame T+0h');
+        onSstForecastHourChange(0, data);
+      }
+    } catch (e) {
+      debugLog('error', 'SST', `Failed to load SST forecast frames: ${e}`);
+      setIsLoading(false);
+    }
+  }, [onSstForecastHourChange]);
+
+  // ------------------------------------------------------------------
+  // SST prefetch effect
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    if (!visible || !isSstMode || !boundsRef.current) return;
+
+    // Client-side cache hit
+    if (sstFrameDataRef.current) {
+      const data = sstFrameDataRef.current;
+      setAvailableHours(deriveHoursFromFrames(data.frames));
+      setPrefetchComplete(true);
+      setIsLoading(false);
+      if (data.frames['0'] && onSstForecastHourChange) onSstForecastHourChange(0, data);
+      return;
+    }
+    setIsLoading(true);
+    setPrefetchComplete(false);
+    loadSstFrames();
+  }, [visible, isSstMode, hasBounds, boundsKey, loadSstFrames]);
+
+  // ------------------------------------------------------------------
+  // Visibility forecast: load all frames
+  // ------------------------------------------------------------------
+  const loadVisFrames = useCallback(async () => {
+    try {
+      debugLog('info', 'VIS', 'Loading visibility forecast frames from API...');
+      const t0 = performance.now();
+      const bp = paddedBounds();
+      const data: VisForecastFrames = await apiClient.getVisForecastFrames(bp);
+      const dt = ((performance.now() - t0) / 1000).toFixed(1);
+      const frameKeys = Object.keys(data.frames);
+      debugLog('info', 'VIS', `Loaded ${frameKeys.length} frames in ${dt}s, grid=${data.ny}x${data.nx}`);
+      setVisFrameData(data);
+      setAvailableHours(deriveHoursFromFrames(data.frames));
+      if (data.run_time) {
+        try {
+          const d = new Date(data.run_time);
+          setRunTime(
+            `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')} ${String(d.getUTCHours()).padStart(2, '0')}Z`
+          );
+        } catch {
+          setRunTime(data.run_time);
+        }
+      }
+      setPrefetchComplete(true);
+      setIsLoading(false);
+      if (data.frames['0'] && onVisForecastHourChange) {
+        debugLog('info', 'VIS', 'Setting initial visibility frame T+0h');
+        onVisForecastHourChange(0, data);
+      }
+    } catch (e) {
+      debugLog('error', 'VIS', `Failed to load visibility forecast frames: ${e}`);
+      setIsLoading(false);
+    }
+  }, [onVisForecastHourChange]);
+
+  // ------------------------------------------------------------------
+  // Visibility prefetch effect (direct load — /frames extracts on-the-fly)
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    if (!visible || !isVisMode || !boundsRef.current) return;
+
+    // Client-side cache hit
+    if (visFrameDataRef.current) {
+      const data = visFrameDataRef.current;
+      setAvailableHours(deriveHoursFromFrames(data.frames));
+      setPrefetchComplete(true);
+      setIsLoading(false);
+      if (data.frames['0'] && onVisForecastHourChange) onVisForecastHourChange(0, data);
+      return;
+    }
+
+    setIsLoading(true);
+    setPrefetchComplete(false);
+    loadVisFrames();
+  }, [visible, isVisMode, hasBounds, boundsKey, loadVisFrames]);
 
   // ------------------------------------------------------------------
   // Play/pause
   // ------------------------------------------------------------------
+  // rAF-based playback — aligned with browser paint cycle so frame
+  // advances never fire while the previous render is still in progress.
   useEffect(() => {
     if (isPlaying && prefetchComplete && hasForecast) {
-      playIntervalRef.current = setInterval(() => {
-        setCurrentHour((prev) => {
-          const idx = FORECAST_HOURS.indexOf(prev);
-          const nextIdx = (idx + 1) % FORECAST_HOURS.length;
-          const nextHour = FORECAST_HOURS[nextIdx];
+      const interval = SPEED_INTERVAL[speed];
+      playLastTickRef.current = performance.now();
 
-          if (isWindMode) {
-            const fd = windFramesRef.current[String(nextHour)] || null;
-            onForecastHourChange(nextHour, fd);
-          } else if (isWaveMode && onWaveForecastHourChange && waveFrameDataRef.current) {
-            onWaveForecastHourChange(nextHour, waveFrameDataRef.current);
-          } else if (isCurrentMode && onCurrentForecastHourChange && currentFrameDataRef.current) {
-            onCurrentForecastHourChange(nextHour, currentFrameDataRef.current);
-          }
-          return nextHour;
-        });
-      }, SPEED_INTERVAL[speed]);
+      const tick = () => {
+        const now = performance.now();
+        if (now - playLastTickRef.current >= interval) {
+          playLastTickRef.current = now;
+          setCurrentHour((prev) => {
+            const fallback = isIceMode ? DEFAULT_ICE_FORECAST_HOURS : DEFAULT_FORECAST_HOURS;
+            const hrs = availableHoursRef.current.length > 0 ? availableHoursRef.current : fallback;
+            const idx = hrs.indexOf(prev);
+            const nextIdx = idx >= 0 ? (idx + 1) % hrs.length : 0;
+            const nextHour = hrs[nextIdx];
+
+            if (isWindMode) {
+              onForecastHourChange(nextHour, windFramesRef.current[String(nextHour)] || null);
+            } else if (isWaveMode && onWaveForecastHourChange && waveFrameDataRef.current) {
+              onWaveForecastHourChange(nextHour, waveFrameDataRef.current);
+            } else if (isCurrentMode && onCurrentForecastHourChange && currentFrameDataRef.current) {
+              onCurrentForecastHourChange(nextHour, currentFrameDataRef.current);
+            } else if (isIceMode && onIceForecastHourChange && iceFrameDataRef.current) {
+              onIceForecastHourChange(nextHour, iceFrameDataRef.current);
+            } else if (isSwellMode && onSwellForecastHourChange && waveFrameDataRef.current) {
+              onSwellForecastHourChange(nextHour, waveFrameDataRef.current);
+            } else if (isSstMode && onSstForecastHourChange && sstFrameDataRef.current) {
+              onSstForecastHourChange(nextHour, sstFrameDataRef.current);
+            } else if (isVisMode && onVisForecastHourChange && visFrameDataRef.current) {
+              onVisForecastHourChange(nextHour, visFrameDataRef.current);
+            }
+            return nextHour;
+          });
+        }
+        playRafRef.current = requestAnimationFrame(tick);
+      };
+
+      playRafRef.current = requestAnimationFrame(tick);
     }
-    return () => { if (playIntervalRef.current) { clearInterval(playIntervalRef.current); playIntervalRef.current = null; } };
-  }, [isPlaying, speed, prefetchComplete, hasForecast, isWindMode, isWaveMode, isCurrentMode, onForecastHourChange, onWaveForecastHourChange, onCurrentForecastHourChange]);
+    return () => { if (playRafRef.current !== null) { cancelAnimationFrame(playRafRef.current); playRafRef.current = null; } };
+  }, [isPlaying, speed, prefetchComplete, hasForecast, isWindMode, isWaveMode, isCurrentMode, isIceMode, isSwellMode, isSstMode, isVisMode, onForecastHourChange, onWaveForecastHourChange, onCurrentForecastHourChange, onIceForecastHourChange, onSwellForecastHourChange, onSstForecastHourChange, onVisForecastHourChange]);
 
-  // Slider change
+  // Slider change — rAF-throttled so rapid scrubbing only renders once
+  // per browser frame.  The slider UI updates immediately (setCurrentHour)
+  // while heavy layer updates are deferred to the next paint.
   const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const hour = parseInt(e.target.value);
     setCurrentHour(hour);
-    if (isWindMode) {
-      onForecastHourChange(hour, windFrames[String(hour)] || null);
-    } else if (isWaveMode && onWaveForecastHourChange && waveFrameData) {
-      onWaveForecastHourChange(hour, waveFrameData);
-    } else if (isCurrentMode && onCurrentForecastHourChange && currentFrameData) {
-      onCurrentForecastHourChange(hour, currentFrameData);
-    }
+    if (sliderRafRef.current !== null) cancelAnimationFrame(sliderRafRef.current);
+    sliderRafRef.current = requestAnimationFrame(() => {
+      sliderRafRef.current = null;
+      if (isWindMode) {
+        onForecastHourChange(hour, windFrames[String(hour)] || null);
+      } else if (isWaveMode && onWaveForecastHourChange && waveFrameData) {
+        onWaveForecastHourChange(hour, waveFrameData);
+      } else if (isCurrentMode && onCurrentForecastHourChange && currentFrameData) {
+        onCurrentForecastHourChange(hour, currentFrameData);
+      } else if (isIceMode && onIceForecastHourChange && iceFrameData) {
+        onIceForecastHourChange(hour, iceFrameData);
+      } else if (isSwellMode && onSwellForecastHourChange && waveFrameData) {
+        onSwellForecastHourChange(hour, waveFrameData);
+      } else if (isSstMode && onSstForecastHourChange && sstFrameData) {
+        onSstForecastHourChange(hour, sstFrameData);
+      } else if (isVisMode && onVisForecastHourChange && visFrameData) {
+        onVisForecastHourChange(hour, visFrameData);
+      }
+    });
   };
 
   // Close
   const handleClose = () => {
     setIsPlaying(false);
+    if (sliderRafRef.current !== null) { cancelAnimationFrame(sliderRafRef.current); sliderRafRef.current = null; }
     setCurrentHour(0);
     onForecastHourChange(0, null);
     if (onWaveForecastHourChange) onWaveForecastHourChange(0, null);
     if (onCurrentForecastHourChange) onCurrentForecastHourChange(0, null);
+    if (onIceForecastHourChange) onIceForecastHourChange(0, null);
+    if (onSwellForecastHourChange) onSwellForecastHourChange(0, null);
+    if (onSstForecastHourChange) onSstForecastHourChange(0, null);
+    if (onVisForecastHourChange) onVisForecastHourChange(0, null);
     onClose();
   };
 
-  // Format valid time
-  const formatValidTime = (fh: number): string => {
-    if (!runTime) return `T+${fh}h`;
+  // Parse runTime into a Date (shared by formatValidTime + slider labels)
+  const parseRunTime = (): Date | null => {
+    if (!runTime) return null;
     try {
       const parts = runTime.split(' ');
       const dateStr = parts[0];
       const hourStr = parts[1]?.replace('Z', '') || '0';
-      const base = new Date(
-        parseInt(dateStr.slice(0, 4)),
-        parseInt(dateStr.slice(4, 6)) - 1,
-        parseInt(dateStr.slice(6, 8)),
-        parseInt(hourStr)
+      return new Date(
+        Date.UTC(
+          parseInt(dateStr.slice(0, 4)),
+          parseInt(dateStr.slice(4, 6)) - 1,
+          parseInt(dateStr.slice(6, 8)),
+          parseInt(hourStr)
+        )
       );
-      base.setHours(base.getHours() + fh);
-      const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-      return `${days[base.getDay()]} ${String(base.getUTCHours()).padStart(2, '0')}:00 UTC`;
+    } catch { return null; }
+  };
+
+  const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+  // Format valid time — shown in the main time display
+  const formatValidTime = (fh: number): string => {
+    const base = parseRunTime();
+    if (!base) return `T+${fh}h`;
+    try {
+      const valid = new Date(base.getTime() + fh * 3600_000);
+      return `${DAYS[valid.getUTCDay()]} ${valid.getUTCDate()} ${MONTHS[valid.getUTCMonth()]} ${String(valid.getUTCHours()).padStart(2, '0')}:00 UTC`;
     } catch {
       return `T+${fh}h`;
+    }
+  };
+
+  // Compact label for slider ticks
+  const formatSliderTick = (fh: number): string => {
+    const base = parseRunTime();
+    if (!base) return isIceMode ? `Day ${fh / 24}` : `${fh}h`;
+    try {
+      const valid = new Date(base.getTime() + fh * 3600_000);
+      if (isIceMode) {
+        return `${DAYS[valid.getUTCDay()]} ${valid.getUTCDate()} ${MONTHS[valid.getUTCMonth()]}`;
+      }
+      return `${DAYS[valid.getUTCDay()]} ${valid.getUTCDate()}\n${String(valid.getUTCHours()).padStart(2, '0')}:00`;
+    } catch {
+      return `${fh}h`;
     }
   };
 
   const formatDataTimestamp = (iso: string): string => {
     try {
       const d = new Date(iso);
-      const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-      return `${days[d.getUTCDay()]} ${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')} UTC`;
+      return `${DAYS[d.getUTCDay()]} ${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')} UTC`;
     } catch {
       return iso;
     }
@@ -395,7 +758,7 @@ export default function ForecastTimeline({
               )}
             </div>
             <div className="text-xs text-gray-500 mt-0.5">
-              Forecast timeline available for Wind and Waves layers
+              Forecast timeline available for Wind, Waves, Currents and Ice layers
             </div>
           </div>
           <button onClick={handleClose} className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded text-gray-400 hover:text-white hover:bg-gray-700 transition-colors">
@@ -406,14 +769,19 @@ export default function ForecastTimeline({
     );
   }
 
-  // Wind / Waves / Currents: full scrubber
-  const layerLabel = isWindMode ? 'Wind' : isWaveMode ? 'Waves' : 'Currents';
+  // Wind / Waves / Currents / Ice: full scrubber
+  const defaultLabel = isWindMode ? 'Wind Speed' : isWaveMode ? 'Waves' : isCurrentMode ? 'Currents' : isIceMode ? 'Ice' : isSwellMode ? 'Swell' : isSstMode ? 'Sea Surface Temp' : 'Visibility';
+  const layerLabel = displayLayerName || defaultLabel;
 
   // Color-code: green when forecast data loaded, gray when not
   const sourceColor = (() => {
     if (isWindMode && Object.keys(windFrames).length > 0) return 'text-green-400';
     if (isWaveMode && waveFrameData) return 'text-green-400';
     if (isCurrentMode && currentFrameData) return 'text-green-400';
+    if (isIceMode && iceFrameData) return 'text-green-400';
+    if (isSwellMode && waveFrameData) return 'text-green-400';
+    if (isSstMode && sstFrameData) return 'text-green-400';
+    if (isVisMode && visFrameData) return 'text-green-400';
     return 'text-gray-500';
   })();
   const hasData = sourceColor === 'text-green-400';
@@ -449,7 +817,7 @@ export default function ForecastTimeline({
         <div className="flex-shrink-0 min-w-[170px]">
           <div className="flex items-center gap-1.5 text-white text-sm font-medium">
             <Clock className="w-3.5 h-3.5 text-primary-400" />
-            <span>{layerLabel} T+{currentHour}h</span>
+            <span>{layerLabel} {isIceMode ? `Day ${currentHour / 24}` : `T+${currentHour}h`}</span>
             <span className="text-gray-400 text-xs">|</span>
             <span className="text-gray-300 text-xs">{formatValidTime(currentHour)}</span>
           </div>
@@ -465,8 +833,8 @@ export default function ForecastTimeline({
           <input
             type="range"
             min={0}
-            max={120}
-            step={3}
+            max={sliderMax}
+            step={sliderStep}
             value={currentHour}
             onChange={handleSliderChange}
             disabled={!prefetchComplete}
@@ -474,10 +842,25 @@ export default function ForecastTimeline({
               [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-primary-400
               [&::-moz-range-thumb]:w-4 [&::-moz-range-thumb]:h-4 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:bg-primary-400 [&::-moz-range-thumb]:border-0`}
           />
-          <div className="flex justify-between mt-1 text-[10px]">
-            {['0h','24h','48h','72h','96h','120h'].map(label => (
-              <span key={label} className={sourceColor}>{label}</span>
-            ))}
+          <div className="flex justify-between mt-1 text-[10px] leading-tight">
+            {(() => {
+              // Generate ~6-10 evenly-spaced labels from the active hours
+              const maxLabels = isIceMode ? activeHours.length : 7;
+              const labelStep = Math.max(1, Math.floor((activeHours.length - 1) / (maxLabels - 1)));
+              const indices: number[] = [];
+              for (let i = 0; i < activeHours.length; i += labelStep) indices.push(i);
+              if (indices[indices.length - 1] !== activeHours.length - 1) indices.push(activeHours.length - 1);
+              return indices.map(i => {
+                const h = activeHours[i];
+                const label = formatSliderTick(h);
+                const lines = label.split('\n');
+                return (
+                  <span key={h} className={`${sourceColor} text-center whitespace-pre`}>
+                    {lines.length > 1 ? <>{lines[0]}<br/>{lines[1]}</> : lines[0]}
+                  </span>
+                );
+              });
+            })()}
           </div>
         </div>
 

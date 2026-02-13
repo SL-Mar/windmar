@@ -54,6 +54,11 @@ class WeatherData:
     swell_period: Optional[np.ndarray] = None  # VTM01_SW1 (s)
     swell_direction: Optional[np.ndarray] = None  # VMDR_SW1 (deg)
 
+    # Extended fields (SPEC-P1)
+    sst: Optional[np.ndarray] = None  # Sea surface temperature (°C)
+    visibility: Optional[np.ndarray] = None  # Visibility (km)
+    ice_concentration: Optional[np.ndarray] = None  # Sea ice fraction (0-1)
+
 
 @dataclass
 class PointWeather:
@@ -76,6 +81,11 @@ class PointWeather:
     swell_height_m: float = 0.0
     swell_period_s: float = 0.0
     swell_dir_deg: float = 0.0
+
+    # Extended fields (SPEC-P1)
+    sst_celsius: float = 15.0  # Sea surface temperature
+    visibility_km: float = 50.0  # Visibility (default: clear)
+    ice_concentration: float = 0.0  # Sea ice fraction (0-1)
 
 
 class CopernicusDataProvider:
@@ -822,6 +832,460 @@ class CopernicusDataProvider:
             logger.error(f"Failed to fetch current forecast: {e}")
             return None
 
+    # ------------------------------------------------------------------
+    # SST (Sea Surface Temperature) from CMEMS physics
+    # ------------------------------------------------------------------
+    def fetch_sst_data(
+        self,
+        lat_min: float,
+        lat_max: float,
+        lon_min: float,
+        lon_max: float,
+        start_time: Optional[datetime] = None,
+    ) -> Optional[WeatherData]:
+        """
+        Fetch sea surface temperature from CMEMS physics dataset.
+
+        Returns:
+            WeatherData with sst field (°C)
+        """
+        if not self._has_copernicusmarine or not self._has_xarray:
+            logger.warning("CMEMS API not available for SST")
+            return None
+
+        if not self.cmems_username or not self.cmems_password:
+            logger.warning("CMEMS credentials not configured for SST")
+            return None
+
+        import copernicusmarine
+        import xarray as xr
+
+        if start_time is None:
+            start_time = datetime.utcnow()
+
+        cache_file = self._get_cache_path(
+            "sst", lat_min, lat_max, lon_min, lon_max, start_time
+        )
+
+        if cache_file.exists():
+            logger.info(f"Loading SST data from cache: {cache_file}")
+            try:
+                ds = xr.open_dataset(cache_file)
+            except Exception as e:
+                logger.warning(f"Corrupted SST cache, re-downloading: {e}")
+                cache_file.unlink(missing_ok=True)
+                ds = None
+        else:
+            ds = None
+
+        if ds is None:
+            logger.info("Downloading SST data from CMEMS...")
+            try:
+                ds = copernicusmarine.open_dataset(
+                    dataset_id=self.CMEMS_PHYSICS_DATASET,
+                    variables=["thetao"],
+                    minimum_longitude=lon_min,
+                    maximum_longitude=lon_max,
+                    minimum_latitude=lat_min,
+                    maximum_latitude=lat_max,
+                    start_datetime=start_time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    end_datetime=(start_time + timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%S"),
+                    minimum_depth=0,
+                    maximum_depth=2,
+                    username=self.cmems_username,
+                    password=self.cmems_password,
+                )
+                if ds is None:
+                    logger.error("CMEMS returned None for SST data")
+                    return None
+                ds.to_netcdf(cache_file)
+            except Exception as e:
+                logger.error(f"Failed to download SST data: {e}")
+                return None
+
+        try:
+            sst = ds['thetao'].values
+            lats = ds['latitude'].values
+            lons = ds['longitude'].values
+
+            # Take first time/depth
+            if len(sst.shape) == 4:
+                sst = sst[0, 0]
+            elif len(sst.shape) == 3:
+                sst = sst[0]
+
+            sst = np.nan_to_num(sst, nan=15.0)
+
+            return WeatherData(
+                parameter="sst",
+                time=start_time,
+                lats=lats,
+                lons=lons,
+                values=sst,
+                unit="°C",
+                sst=sst,
+            )
+        except Exception as e:
+            logger.error(f"Failed to parse SST data: {e}")
+            return None
+
+    # ------------------------------------------------------------------
+    # SST Forecast (0-120h, 3h steps) from CMEMS physics
+    # ------------------------------------------------------------------
+    SST_FORECAST_HOURS = list(range(0, 121, 3))  # 0-120h every 3h = 41 steps
+
+    def fetch_sst_forecast(
+        self,
+        lat_min: float,
+        lat_max: float,
+        lon_min: float,
+        lon_max: float,
+    ) -> Optional[Dict[int, "WeatherData"]]:
+        """
+        Fetch 0-120h sea surface temperature forecast from CMEMS in a single download.
+
+        Uses the CMEMS physics dataset (hourly means, 1/12 deg resolution).
+        Returns:
+            Dict mapping forecast_hour -> WeatherData with SST field (°C),
+            or None on failure.
+        """
+        if not self._has_copernicusmarine or not self._has_xarray:
+            logger.warning("CMEMS API not available for SST forecast")
+            return None
+
+        import copernicusmarine
+        import xarray as xr
+
+        logger.info(f"SST forecast bbox: lat[{lat_min:.1f},{lat_max:.1f}] lon[{lon_min:.1f},{lon_max:.1f}]")
+
+        now = datetime.utcnow()
+        start_dt = now - timedelta(hours=1)
+        end_dt = now + timedelta(hours=122)
+
+        cache_key = now.strftime("%Y%m%d_%H")
+        cache_file = (
+            self.cache_dir
+            / f"sst_forecast_{cache_key}_lat{lat_min:.0f}_{lat_max:.0f}_lon{lon_min:.0f}_{lon_max:.0f}.nc"
+        )
+
+        try:
+            if cache_file.exists():
+                logger.info(f"Loading SST forecast from cache: {cache_file}")
+                try:
+                    ds = xr.open_dataset(cache_file)
+                except Exception as e:
+                    logger.warning(f"Corrupted SST forecast cache, deleting and re-downloading: {e}")
+                    cache_file.unlink(missing_ok=True)
+                    ds = None
+            else:
+                ds = None
+
+            if ds is None:
+                logger.info(f"Downloading CMEMS SST forecast {start_dt} -> {end_dt}")
+                ds = copernicusmarine.open_dataset(
+                    dataset_id=self.CMEMS_PHYSICS_DATASET,
+                    variables=["thetao"],
+                    minimum_longitude=lon_min,
+                    maximum_longitude=lon_max,
+                    minimum_latitude=lat_min,
+                    maximum_latitude=lat_max,
+                    start_datetime=start_dt.strftime("%Y-%m-%dT%H:%M:%S"),
+                    end_datetime=end_dt.strftime("%Y-%m-%dT%H:%M:%S"),
+                    minimum_depth=0,
+                    maximum_depth=2,
+                    username=self.cmems_username,
+                    password=self.cmems_password,
+                )
+                if ds is None:
+                    logger.error("CMEMS returned None for SST forecast")
+                    return None
+                logger.info("Loading SST forecast data into memory...")
+                ds = ds.load()
+                ds.to_netcdf(cache_file)
+                ds.close()
+                logger.info(f"SST forecast cached: {cache_file}")
+                fsize = cache_file.stat().st_size
+                if fsize < 500_000:
+                    logger.warning(f"SST forecast cache suspiciously small ({fsize} bytes), deleting")
+                    cache_file.unlink(missing_ok=True)
+                    return None
+                ds = xr.open_dataset(cache_file)
+
+            lats = ds["latitude"].values
+            lons = ds["longitude"].values
+            times = ds["time"].values
+
+            import pandas as pd
+
+            base_time = pd.Timestamp(times[0]).to_pydatetime()
+            frames: Dict[int, WeatherData] = {}
+
+            for t_idx in range(len(times)):
+                ts = pd.Timestamp(times[t_idx]).to_pydatetime()
+                fh = round((ts - base_time).total_seconds() / 3600)
+                if fh < 0 or fh > 120 or fh % 3 != 0:
+                    continue
+
+                thetao = ds["thetao"].values
+
+                # Handle depth dimension
+                if len(thetao.shape) == 4:
+                    sst_2d = thetao[t_idx, 0]
+                elif len(thetao.shape) == 3:
+                    sst_2d = thetao[t_idx]
+                else:
+                    continue
+
+                sst_2d = np.nan_to_num(sst_2d, nan=15.0)
+
+                frames[fh] = WeatherData(
+                    parameter="sst",
+                    time=ts,
+                    lats=lats,
+                    lons=lons,
+                    values=sst_2d,
+                    unit="°C",
+                    sst=sst_2d,
+                )
+
+            logger.info(f"SST forecast: {len(frames)} frames extracted (hours: {sorted(frames.keys())})")
+            return frames if frames else None
+
+        except Exception as e:
+            logger.error(f"Failed to fetch SST forecast: {e}")
+            return None
+
+    # ------------------------------------------------------------------
+    # Sea Ice Concentration from CMEMS
+    # ------------------------------------------------------------------
+    CMEMS_ICE_DATASET = "cmems_mod_glo_phy_anfc_0.083deg_P1D-m"
+    ICE_FORECAST_DAYS = 10
+    ICE_FORECAST_HOURS = list(range(0, 217, 24))  # 0-216h every 24h = 10 steps
+
+    def fetch_ice_data(
+        self,
+        lat_min: float,
+        lat_max: float,
+        lon_min: float,
+        lon_max: float,
+        start_time: Optional[datetime] = None,
+    ) -> Optional[WeatherData]:
+        """
+        Fetch sea ice concentration from CMEMS.
+
+        Returns:
+            WeatherData with ice_concentration field (0-1 fraction)
+        """
+        if not self._has_copernicusmarine or not self._has_xarray:
+            logger.warning("CMEMS API not available for ice data")
+            return None
+
+        if not self.cmems_username or not self.cmems_password:
+            logger.warning("CMEMS credentials not configured for ice data")
+            return None
+
+        # Only fetch if region includes high latitudes (>55° or <-55°)
+        if abs(lat_max) < 55 and abs(lat_min) < 55:
+            logger.info("Region below 55° latitude — skipping ice data fetch")
+            return None
+
+        import copernicusmarine
+        import xarray as xr
+
+        if start_time is None:
+            start_time = datetime.utcnow()
+
+        cache_file = self._get_cache_path(
+            "ice", lat_min, lat_max, lon_min, lon_max, start_time
+        )
+
+        if cache_file.exists():
+            logger.info(f"Loading ice data from cache: {cache_file}")
+            try:
+                ds = xr.open_dataset(cache_file)
+            except Exception as e:
+                logger.warning(f"Corrupted ice cache, re-downloading: {e}")
+                cache_file.unlink(missing_ok=True)
+                ds = None
+        else:
+            ds = None
+
+        if ds is None:
+            logger.info("Downloading ice concentration from CMEMS...")
+            try:
+                ds = copernicusmarine.open_dataset(
+                    dataset_id=self.CMEMS_ICE_DATASET,
+                    variables=["siconc"],
+                    minimum_longitude=lon_min,
+                    maximum_longitude=lon_max,
+                    minimum_latitude=lat_min,
+                    maximum_latitude=lat_max,
+                    start_datetime=start_time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    end_datetime=(start_time + timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%S"),
+                    username=self.cmems_username,
+                    password=self.cmems_password,
+                )
+                if ds is None:
+                    logger.error("CMEMS returned None for ice data")
+                    return None
+                ds.to_netcdf(cache_file)
+            except Exception as e:
+                logger.error(f"Failed to download ice data: {e}")
+                return None
+
+        try:
+            siconc = ds['siconc'].values
+            lats = ds['latitude'].values
+            lons = ds['longitude'].values
+
+            if len(siconc.shape) == 3:
+                siconc = siconc[0]
+
+            # Clamp to 0-1 and replace NaN (open ocean = 0)
+            siconc = np.nan_to_num(siconc, nan=0.0)
+            siconc = np.clip(siconc, 0.0, 1.0)
+
+            return WeatherData(
+                parameter="ice_concentration",
+                time=start_time,
+                lats=lats,
+                lons=lons,
+                values=siconc,
+                unit="fraction",
+                ice_concentration=siconc,
+            )
+        except Exception as e:
+            logger.error(f"Failed to parse ice data: {e}")
+            return None
+
+    def fetch_ice_forecast(
+        self,
+        lat_min: float,
+        lat_max: float,
+        lon_min: float,
+        lon_max: float,
+    ) -> Optional[Dict[int, "WeatherData"]]:
+        """
+        Fetch 10-day daily ice concentration forecast from CMEMS.
+
+        Returns:
+            Dict mapping forecast_hour → WeatherData (0, 24, 48, ..., 216),
+            or None on failure.
+        """
+        if not self._has_copernicusmarine or not self._has_xarray:
+            logger.warning("CMEMS API not available for ice forecast")
+            return None
+
+        if not self.cmems_username or not self.cmems_password:
+            logger.warning("CMEMS credentials not configured for ice forecast")
+            return None
+
+        # Only fetch if region includes high latitudes (>55° or <-55°)
+        if abs(lat_max) < 55 and abs(lat_min) < 55:
+            logger.info("Region below 55° latitude — skipping ice forecast")
+            return None
+
+        import copernicusmarine
+        import xarray as xr
+
+        logger.info(f"Ice forecast bbox: lat[{lat_min:.1f},{lat_max:.1f}] lon[{lon_min:.1f},{lon_max:.1f}]")
+
+        now = datetime.utcnow()
+        start_dt = now - timedelta(hours=1)
+        end_dt = now + timedelta(days=self.ICE_FORECAST_DAYS + 1)
+
+        cache_key = now.strftime("%Y%m%d")
+        cache_file = (
+            self.cache_dir
+            / f"ice_forecast_{cache_key}_lat{lat_min:.0f}_{lat_max:.0f}_lon{lon_min:.0f}_{lon_max:.0f}.nc"
+        )
+
+        try:
+            if cache_file.exists():
+                logger.info(f"Loading ice forecast from cache: {cache_file}")
+                try:
+                    ds = xr.open_dataset(cache_file)
+                except Exception as e:
+                    logger.warning(f"Corrupted ice forecast cache, deleting and re-downloading: {e}")
+                    cache_file.unlink(missing_ok=True)
+                    ds = None
+            else:
+                ds = None
+
+            if ds is None:
+                logger.info(f"Downloading CMEMS ice forecast {start_dt} → {end_dt}")
+                ds = copernicusmarine.open_dataset(
+                    dataset_id=self.CMEMS_ICE_DATASET,
+                    variables=["siconc"],
+                    minimum_longitude=lon_min,
+                    maximum_longitude=lon_max,
+                    minimum_latitude=lat_min,
+                    maximum_latitude=lat_max,
+                    start_datetime=start_dt.strftime("%Y-%m-%dT%H:%M:%S"),
+                    end_datetime=end_dt.strftime("%Y-%m-%dT%H:%M:%S"),
+                    username=self.cmems_username,
+                    password=self.cmems_password,
+                )
+                if ds is None:
+                    logger.error("CMEMS returned None for ice forecast")
+                    return None
+                logger.info("Loading ice forecast data into memory...")
+                ds = ds.load()
+                ds.to_netcdf(cache_file)
+                ds.close()
+                logger.info(f"Ice forecast cached: {cache_file}")
+                fsize = cache_file.stat().st_size
+                if fsize < 100_000:
+                    logger.warning(f"Ice forecast cache suspiciously small ({fsize} bytes), deleting")
+                    cache_file.unlink(missing_ok=True)
+                    return None
+                ds = xr.open_dataset(cache_file)
+
+            lats = ds["latitude"].values
+            lons = ds["longitude"].values
+            times = ds["time"].values
+
+            import pandas as pd
+
+            base_time = pd.Timestamp(times[0]).to_pydatetime()
+            frames: Dict[int, WeatherData] = {}
+
+            for t_idx in range(len(times)):
+                ts = pd.Timestamp(times[t_idx]).to_pydatetime()
+                delta_hours = round((ts - base_time).total_seconds() / 3600)
+                # Only keep daily steps (multiples of 24) within 0-216h
+                fh = round(delta_hours / 24) * 24
+                if fh < 0 or fh > 216 or fh in frames:
+                    continue
+
+                siconc = ds["siconc"].values
+                if len(siconc.shape) == 3 and t_idx < siconc.shape[0]:
+                    siconc_2d = siconc[t_idx]
+                elif len(siconc.shape) == 2:
+                    siconc_2d = siconc
+                else:
+                    continue
+
+                siconc_2d = np.nan_to_num(siconc_2d, nan=0.0)
+                siconc_2d = np.clip(siconc_2d, 0.0, 1.0)
+
+                frames[fh] = WeatherData(
+                    parameter="ice_concentration",
+                    time=ts,
+                    lats=lats,
+                    lons=lons,
+                    values=siconc_2d,
+                    unit="fraction",
+                    ice_concentration=siconc_2d,
+                )
+
+            logger.info(f"Ice forecast: {len(frames)} frames extracted (hours: {sorted(frames.keys())})")
+            return frames if frames else None
+
+        except Exception as e:
+            logger.error(f"Failed to fetch ice forecast: {e}")
+            return None
+
     def get_weather_at_point(
         self,
         lat: float,
@@ -1091,6 +1555,164 @@ class SyntheticDataProvider:
         )
 
 
+    def generate_sst_field(
+        self,
+        lat_min: float,
+        lat_max: float,
+        lon_min: float,
+        lon_max: float,
+        resolution: float = 1.0,
+        time: Optional[datetime] = None,
+    ) -> WeatherData:
+        """Generate synthetic SST field based on latitude."""
+        if time is None:
+            time = datetime.utcnow()
+
+        lats = np.arange(lat_min, lat_max + resolution, resolution)
+        lons = np.arange(lon_min, lon_max + resolution, resolution)
+        lon_grid, lat_grid = np.meshgrid(lons, lats)
+
+        # SST decreases with latitude: ~28°C at equator, ~0°C at poles
+        # Seasonal variation: ±3°C
+        month = time.month
+        seasonal = 3.0 * np.cos(np.radians((month - 7) * 30))  # Peak in July (NH)
+        base_sst = 28.0 - 0.5 * np.abs(lat_grid)
+        sst = base_sst + seasonal * np.sign(lat_grid) + np.random.randn(*lat_grid.shape) * 0.3
+        sst = np.clip(sst, -2.0, 32.0)
+
+        return WeatherData(
+            parameter="sst",
+            time=time,
+            lats=lats,
+            lons=lons,
+            values=sst,
+            unit="°C",
+            sst=sst,
+        )
+
+    def generate_visibility_field(
+        self,
+        lat_min: float,
+        lat_max: float,
+        lon_min: float,
+        lon_max: float,
+        resolution: float = 1.0,
+        time: Optional[datetime] = None,
+    ) -> WeatherData:
+        """Generate synthetic visibility field."""
+        if time is None:
+            time = datetime.utcnow()
+
+        lats = np.arange(lat_min, lat_max + resolution, resolution)
+        lons = np.arange(lon_min, lon_max + resolution, resolution)
+        lon_grid, lat_grid = np.meshgrid(lons, lats)
+
+        # Generally good visibility at sea (20-50 km), reduced near coasts and in high latitudes
+        base_vis = 30.0 + 10.0 * np.random.rand(*lat_grid.shape)
+        # Reduced visibility at high latitudes (fog/mist)
+        high_lat_reduction = np.maximum(0, (np.abs(lat_grid) - 50) * 0.5)
+        vis = np.maximum(base_vis - high_lat_reduction, 1.0)
+
+        return WeatherData(
+            parameter="visibility",
+            time=time,
+            lats=lats,
+            lons=lons,
+            values=vis,
+            unit="km",
+            visibility=vis,
+        )
+
+    def generate_ice_field(
+        self,
+        lat_min: float,
+        lat_max: float,
+        lon_min: float,
+        lon_max: float,
+        resolution: float = 1.0,
+        time: Optional[datetime] = None,
+    ) -> WeatherData:
+        """Generate synthetic ice concentration field."""
+        if time is None:
+            time = datetime.utcnow()
+
+        lats = np.arange(lat_min, lat_max + resolution, resolution)
+        lons = np.arange(lon_min, lon_max + resolution, resolution)
+        lon_grid, lat_grid = np.meshgrid(lons, lats)
+
+        # Ice only at high latitudes (>65°)
+        # Seasonal: more in winter, less in summer
+        month = time.month
+        # NH winter months
+        nh_seasonal = 1.0 if month in [12, 1, 2, 3] else 0.5 if month in [4, 11] else 0.2
+        sh_seasonal = 1.0 if month in [6, 7, 8, 9] else 0.5 if month in [5, 10] else 0.2
+
+        ice = np.zeros_like(lat_grid)
+        # Northern hemisphere ice
+        nh_mask = lat_grid > 65
+        ice[nh_mask] = np.clip((lat_grid[nh_mask] - 65) / 15 * nh_seasonal, 0, 1)
+        # Southern hemisphere ice
+        sh_mask = lat_grid < -60
+        ice[sh_mask] = np.clip((-lat_grid[sh_mask] - 60) / 15 * sh_seasonal, 0, 1)
+
+        return WeatherData(
+            parameter="ice_concentration",
+            time=time,
+            lats=lats,
+            lons=lons,
+            values=ice,
+            unit="fraction",
+            ice_concentration=ice,
+        )
+
+    def generate_ice_forecast(
+        self,
+        lat_min: float,
+        lat_max: float,
+        lon_min: float,
+        lon_max: float,
+        resolution: float = 1.0,
+    ) -> Dict[int, WeatherData]:
+        """Generate 10-day synthetic ice forecast with daily variation."""
+        frames: Dict[int, WeatherData] = {}
+        base_time = datetime.utcnow()
+
+        for day in range(10):
+            fh = day * 24
+            time = base_time + timedelta(hours=fh)
+            # Slight daily variation: ice edge shifts poleward over forecast period
+            lat_shift = day * 0.2  # Ice retreats ~0.2° per day in forecast
+
+            lats = np.arange(lat_min, lat_max + resolution, resolution)
+            lons = np.arange(lon_min, lon_max + resolution, resolution)
+            lon_grid, lat_grid = np.meshgrid(lons, lats)
+
+            month = time.month
+            nh_seasonal = 1.0 if month in [12, 1, 2, 3] else 0.5 if month in [4, 11] else 0.2
+            sh_seasonal = 1.0 if month in [6, 7, 8, 9] else 0.5 if month in [5, 10] else 0.2
+
+            ice = np.zeros_like(lat_grid)
+            nh_mask = lat_grid > (65 + lat_shift)
+            ice[nh_mask] = np.clip((lat_grid[nh_mask] - 65 - lat_shift) / 15 * nh_seasonal, 0, 1)
+            sh_mask = lat_grid < (-60 - lat_shift)
+            ice[sh_mask] = np.clip((-lat_grid[sh_mask] - 60 - lat_shift) / 15 * sh_seasonal, 0, 1)
+
+            # Add random noise for daily variation
+            ice += np.random.randn(*ice.shape) * 0.02
+            ice = np.clip(ice, 0.0, 1.0)
+
+            frames[fh] = WeatherData(
+                parameter="ice_concentration",
+                time=time,
+                lats=lats,
+                lons=lons,
+                values=ice,
+                unit="fraction",
+                ice_concentration=ice,
+            )
+
+        return frames
+
     def generate_current_field(
         self,
         lat_min: float,
@@ -1279,12 +1901,16 @@ class GFSDataProvider:
         lon_max: float,
         time: Optional[datetime] = None,
         forecast_hour: int = 0,
+        run_date: Optional[str] = None,
+        run_hour: Optional[str] = None,
     ) -> Optional[WeatherData]:
         """
         Fetch near-real-time wind data from GFS.
 
         Args:
             forecast_hour: GFS forecast hour (0=analysis, 3-120 in 3h steps)
+            run_date: GFS run date "YYYYMMDD". If None, uses latest run.
+            run_hour: GFS run hour "HH". If None, uses latest run.
 
         Returns:
             WeatherData with u/v wind components, or None on failure.
@@ -1298,7 +1924,8 @@ class GFSDataProvider:
         if time is None:
             time = datetime.utcnow()
 
-        run_date, run_hour = self._get_latest_run()
+        if run_date is None or run_hour is None:
+            run_date, run_hour = self._get_latest_run()
 
         grib_path = self._download_grib(lat_min, lat_max, lon_min, lon_max, run_date, run_hour, forecast_hour)
         if grib_path is None:
@@ -1369,6 +1996,173 @@ class GFSDataProvider:
             logger.error(f"Failed to parse GFS GRIB2: {e}")
             return None
 
+    def fetch_visibility_data(
+        self,
+        lat_min: float,
+        lat_max: float,
+        lon_min: float,
+        lon_max: float,
+        time: Optional[datetime] = None,
+        forecast_hour: int = 0,
+    ) -> Optional[WeatherData]:
+        """
+        Fetch visibility data from GFS.
+
+        GFS provides surface visibility (VIS) in meters.
+
+        Returns:
+            WeatherData with visibility field (km)
+        """
+        try:
+            import pygrib
+        except ImportError:
+            logger.warning("pygrib not installed, visibility data unavailable")
+            return None
+
+        if time is None:
+            time = datetime.utcnow()
+
+        run_date, run_hour = self._get_latest_run()
+
+        # Build NOMADS URL with VIS variable
+        import urllib.request
+        import urllib.parse
+
+        gfs_lon_min = self._to_gfs_lon(lon_min)
+        gfs_lon_max = self._to_gfs_lon(lon_max)
+        if gfs_lon_min > gfs_lon_max:
+            gfs_lon_min = lon_min
+            gfs_lon_max = lon_max
+
+        cache_file = (
+            self.cache_dir
+            / f"gfs_vis_{run_date}_{run_hour}_f{forecast_hour:03d}_lat{lat_min:.0f}_{lat_max:.0f}_lon{lon_min:.0f}_{lon_max:.0f}.grib2"
+        )
+
+        if cache_file.exists():
+            logger.info(f"GFS visibility cache hit: {cache_file.name}")
+        else:
+            params = {
+                "file": f"gfs.t{run_hour}z.pgrb2.0p25.f{forecast_hour:03d}",
+                "lev_surface": "on",
+                "var_VIS": "on",
+                "subregion": "",
+                "leftlon": str(gfs_lon_min),
+                "rightlon": str(gfs_lon_max),
+                "toplat": str(lat_max),
+                "bottomlat": str(lat_min),
+                "dir": f"/gfs.{run_date}/{run_hour}/atmos",
+            }
+            url = f"{self.NOMADS_BASE}?{urllib.parse.urlencode(params)}"
+            logger.info(f"Downloading GFS visibility: f{forecast_hour:03d}")
+
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "Windmar/2.1"})
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    data = resp.read()
+                if len(data) < 100:
+                    logger.warning(f"GFS visibility download too small ({len(data)} bytes)")
+                    return None
+                cache_file.write_bytes(data)
+            except Exception as e:
+                logger.warning(f"GFS visibility download failed: {e}")
+                return None
+
+        try:
+            grbs = pygrib.open(str(cache_file))
+            vis_msgs = grbs.select(shortName='vis')
+            if not vis_msgs:
+                grbs.close()
+                logger.warning("GFS GRIB2 missing VIS message")
+                return None
+
+            vis_msg = vis_msgs[0]
+            vis_data = vis_msg.values  # meters
+            lats_2d, lons_2d = vis_msg.latlons()
+            lats = lats_2d[:, 0]
+            lons = lons_2d[0, :]
+            grbs.close()
+
+            # Convert 0-360 to -180..180
+            lon_shift = lons > 180
+            if np.any(lon_shift):
+                lons[lon_shift] -= 360
+                sort_idx = np.argsort(lons)
+                lons = lons[sort_idx]
+                vis_data = vis_data[:, sort_idx]
+
+            # Convert meters to km, replace NaN
+            vis_km = np.nan_to_num(vis_data, nan=50000.0) / 1000.0
+            vis_km = np.clip(vis_km, 0.0, 100.0)
+
+            ref_time = datetime.strptime(f"{run_date}{run_hour}", "%Y%m%d%H") + timedelta(hours=forecast_hour)
+
+            logger.info(
+                f"GFS visibility fetched: {len(lats)}x{len(lons)} grid, "
+                f"range={vis_km.min():.1f}-{vis_km.max():.1f} km"
+            )
+
+            return WeatherData(
+                parameter="visibility",
+                time=ref_time,
+                lats=lats,
+                lons=lons,
+                values=vis_km,
+                unit="km",
+                visibility=vis_km,
+            )
+        except Exception as e:
+            logger.error(f"Failed to parse GFS visibility GRIB2: {e}")
+            return None
+
+    # ------------------------------------------------------------------
+    # Visibility Forecast (0-120h, 3h steps) from GFS
+    # ------------------------------------------------------------------
+    VIS_FORECAST_HOURS = list(range(0, 121, 3))  # 0-120h every 3h = 41 steps
+
+    def fetch_visibility_forecast(
+        self,
+        lat_min: float,
+        lat_max: float,
+        lon_min: float,
+        lon_max: float,
+    ) -> Optional[Dict[int, "WeatherData"]]:
+        """
+        Fetch 0-120h visibility forecast from GFS (one GRIB2 download per hour).
+
+        Loops over VIS_FORECAST_HOURS, calls fetch_visibility_data() per hour
+        with a 2s sleep between NOMADS requests for rate limiting.
+
+        Returns:
+            Dict mapping forecast_hour -> WeatherData with visibility (km),
+            or None on failure.
+        """
+        import time as _time
+
+        logger.info(f"Visibility forecast: fetching {len(self.VIS_FORECAST_HOURS)} hours from GFS")
+
+        frames: Dict[int, WeatherData] = {}
+        for fh in self.VIS_FORECAST_HOURS:
+            try:
+                wd = self.fetch_visibility_data(
+                    lat_min, lat_max, lon_min, lon_max,
+                    forecast_hour=fh,
+                )
+                if wd is not None:
+                    frames[fh] = wd
+                    logger.info(f"Visibility forecast f{fh:03d}: OK ({wd.values.min():.1f}-{wd.values.max():.1f} km)")
+                else:
+                    logger.warning(f"Visibility forecast f{fh:03d}: no data")
+            except Exception as e:
+                logger.warning(f"Visibility forecast f{fh:03d} failed: {e}")
+
+            # Rate limit: 2s between NOMADS requests (matches wind pattern)
+            if fh < self.VIS_FORECAST_HOURS[-1]:
+                _time.sleep(2)
+
+        logger.info(f"Visibility forecast complete: {len(frames)}/{len(self.VIS_FORECAST_HOURS)} frames")
+        return frames if frames else None
+
     # All GFS forecast hours: f000 to f120 in 3h steps
     FORECAST_HOURS = list(range(0, 121, 3))  # 41 files
 
@@ -1412,14 +2206,21 @@ class GFSDataProvider:
         lat_max: float,
         lon_min: float,
         lon_max: float,
+        run_date: Optional[str] = None,
+        run_hour: Optional[str] = None,
     ) -> List[Dict]:
         """
-        Check which forecast hours are cached for the current GFS run.
+        Check which forecast hours are cached for a given GFS run.
+
+        Args:
+            run_date: GFS run date "YYYYMMDD". If None, uses latest run.
+            run_hour: GFS run hour "HH". If None, uses latest run.
 
         Returns:
             List of dicts with forecast_hour, valid_time, and cached status.
         """
-        run_date, run_hour = self._get_latest_run()
+        if run_date is None or run_hour is None:
+            run_date, run_hour = self._get_latest_run()
         run_time = datetime.strptime(f"{run_date}{run_hour}", "%Y%m%d%H")
         result = []
 
@@ -1436,6 +2237,32 @@ class GFSDataProvider:
             })
 
         return result
+
+    def find_best_cached_run(
+        self,
+        lat_min: float,
+        lat_max: float,
+        lon_min: float,
+        lon_max: float,
+    ) -> Optional[Tuple[str, str]]:
+        """
+        Find the most recent GFS run that has cached files for the given bbox.
+
+        Scans the cache directory for GRIB files matching the bbox and returns
+        the newest (run_date, run_hour) tuple, or None if no cached run found.
+        """
+        import re
+        bbox_suffix = f"lat{lat_min:.0f}_{lat_max:.0f}_lon{lon_min:.0f}_{lon_max:.0f}"
+        pattern = re.compile(r"gfs_(\d{8})_(\d{2})_f\d{3}_" + re.escape(bbox_suffix) + r"\.grib2$")
+        runs = set()
+        for f in self.cache_dir.glob(f"gfs_*_{bbox_suffix}.grib2"):
+            m = pattern.match(f.name)
+            if m:
+                runs.add((m.group(1), m.group(2)))
+        if not runs:
+            return None
+        # Return the most recent run (sorted by date+hour descending)
+        return max(runs, key=lambda r: r[0] + r[1])
 
     def clear_old_cache(self, keep_hours: int = 12) -> int:
         """Remove GRIB cache files older than keep_hours."""
