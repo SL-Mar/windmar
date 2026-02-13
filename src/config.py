@@ -93,6 +93,9 @@ class Settings:
     sim_speed_kts: float = field(default_factory=lambda: get_float("SIM_SPEED_KTS", 12.0))
     sim_heading_deg: float = field(default_factory=lambda: get_float("SIM_HEADING_DEG", 270.0))
 
+    # Demo Mode
+    demo_mode: bool = field(default_factory=lambda: get_bool("DEMO_MODE", False))
+
     # Data Storage
     grib_cache_dir: str = field(default_factory=lambda: os.getenv("GRIB_CACHE_DIR", "data/grib_cache"))
     data_dir: str = field(default_factory=lambda: os.getenv("DATA_DIR", "data"))

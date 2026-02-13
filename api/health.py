@@ -224,6 +224,7 @@ async def perform_full_health_check() -> Dict[str, Any]:
         "status": overall_status.value,
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "version": "2.1.0",
+        "demo_mode": settings.demo_mode,
         "check_duration_ms": round(total_time_ms, 2),
         "components": {
             c.name: {

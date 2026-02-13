@@ -14,6 +14,7 @@ import {
   RouteVisibility, ROUTE_STYLES, EMPTY_ALL_RESULTS,
 } from '@/lib/api';
 import { AnalysisEntry } from '@/lib/analysisStorage';
+import { DEMO_MODE, DEMO_TOOLTIP } from '@/lib/demoMode';
 
 interface AnalysisPanelProps {
   waypoints: Position[];
@@ -278,7 +279,8 @@ export default function AnalysisPanel({
             {/* ── Optimize Route ── */}
             <button
               onClick={onOptimize}
-              disabled={isOptimizing || !hasRoute}
+              disabled={isOptimizing || !hasRoute || DEMO_MODE}
+              title={DEMO_MODE ? DEMO_TOOLTIP : undefined}
               className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium bg-ocean-500/20 text-ocean-400 hover:bg-ocean-500/30 transition-colors disabled:opacity-50"
             >
               {isOptimizing ? (
@@ -354,7 +356,8 @@ export default function AnalysisPanel({
               <>
                 <button
                   onClick={onRunSimulations}
-                  disabled={isSimulating}
+                  disabled={isSimulating || DEMO_MODE}
+                  title={DEMO_MODE ? DEMO_TOOLTIP : undefined}
                   className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-medium bg-white/5 text-gray-300 hover:bg-white/10 transition-colors disabled:opacity-50"
                 >
                   {isSimulating ? (

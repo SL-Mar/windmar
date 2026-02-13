@@ -6,6 +6,7 @@ import Link from 'next/link';
 import VoyageDropdown from '@/components/VoyageDropdown';
 import RegulationsDropdown from '@/components/RegulationsDropdown';
 import { useVoyage } from '@/components/VoyageContext';
+import { DEMO_MODE } from '@/lib/demoMode';
 
 type DropdownId = 'voyage' | 'regulations' | null;
 
@@ -143,10 +144,17 @@ export default function Header({ onFitRoute }: HeaderProps) {
             <div className="w-px h-6 bg-white/10 mx-2" />
 
             {/* Status Indicator */}
-            <div className="flex items-center space-x-2">
-              <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
-              <span className="text-sm text-gray-300">Online</span>
-            </div>
+            {DEMO_MODE ? (
+              <div className="flex items-center space-x-1.5 px-2.5 py-1 rounded-full bg-amber-500/15 border border-amber-500/30">
+                <div className="w-2 h-2 bg-amber-400 rounded-full" />
+                <span className="text-xs font-semibold text-amber-400 tracking-wide">DEMO</span>
+              </div>
+            ) : (
+              <div className="flex items-center space-x-2">
+                <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
+                <span className="text-sm text-gray-300">Online</span>
+              </div>
+            )}
 
             {/* Exit */}
             <button

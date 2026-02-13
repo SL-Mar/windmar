@@ -266,6 +266,49 @@ See the [Weather Data Documentation](https://quantcoder-fs.com/windmar/weather-d
 
 See the [Monte Carlo Simulation](https://quantcoder-fs.com/windmar/monte-carlo.html) article for the mathematical framework behind the temporal perturbation model.
 
+## Demo Mode
+
+A lightweight demo profile that runs on a cheap VPS with pre-loaded weather data.
+No external API credentials required.
+
+### What works in demo mode
+
+- Voyage calculation (per-leg SOG, ETA, fuel)
+- All GET weather endpoints (wind, waves, currents, ice, SST, visibility)
+- Vessel configuration, zones, CII calculations
+- Route management (import RTZ, draw waypoints)
+- Forecast frame playback
+
+### What's disabled
+
+- Route optimization (A\*/VISIR) — returns 403
+- Monte Carlo simulation — returns 403
+- All weather prefetch/ingestion — returns 200 stub
+- Background ingestion loop — skipped at startup
+
+### Generate the snapshot
+
+Requires a running dev instance with weather data already ingested:
+
+```bash
+bash scripts/demo-dump.sh
+# → data/demo-snapshot.sql.gz
+```
+
+### Run locally
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d
+```
+
+### CI/CD
+
+Push to `main` triggers `.github/workflows/deploy-demo.yml`, which builds
+`:demo`-tagged images to `ghcr.io` and deploys to the VPS via SSH.
+
+Required GitHub secrets: `DEMO_VPS_HOST`, `DEMO_VPS_USER`, `DEMO_VPS_SSH_KEY`,
+`DEMO_API_SECRET`, `DEMO_API_URL`.
+
 ## API Endpoints
 
 ### Weather

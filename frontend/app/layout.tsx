@@ -2,6 +2,7 @@ import type { Metadata } from 'next'
 import './globals.css'
 import { Providers } from './providers'
 import { VoyageProvider } from '@/components/VoyageContext'
+import { DemoFooter } from '@/components/DemoFooter'
 
 export const metadata: Metadata = {
   title: 'WINDMAR - Marine Route Analysis',
@@ -27,7 +28,10 @@ export default function RootLayout({
       </head>
       <body>
         <Providers>
-          <VoyageProvider>{children}</VoyageProvider>
+          <VoyageProvider>
+            {children}
+            <DemoFooter />
+          </VoyageProvider>
         </Providers>
       </body>
     </html>

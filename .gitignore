@@ -60,6 +60,9 @@ htmlcov/
 # Backups
 docker/backup/backups/
 
+# Demo snapshot (too large for git — uploaded to VPS directly)
+data/demo-snapshot.sql.gz
+
 # OS
 .DS_Store
 Thumbs.db

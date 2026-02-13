@@ -111,6 +111,7 @@ from src.data.regulatory_zones import (
     get_zone_checker, Zone, ZoneProperties, ZoneType, ZoneInteraction
 )
 from api.config import settings
+from api.demo import require_not_demo, demo_mode_response, is_demo
 from api.middleware import (
     setup_middleware,
     metrics_collector,
@@ -1113,6 +1114,7 @@ async def root():
         "name": "WINDMAR API",
         "version": "2.1.0",
         "status": "operational",
+        "demo_mode": is_demo(),
         "docs": "/api/docs",
         "endpoints": {
             "health": "/api/health",
@@ -1352,6 +1354,9 @@ async def api_ensure_all_weather(req: EnsureAllRequest):
     If force=true, re-ingests ALL sources regardless of freshness.
     Returns status per source and total elapsed time.
     """
+    if is_demo():
+        return demo_mode_response("Weather ingestion")
+
     import time as _time
 
     if db_weather is None or weather_ingestion is None:
@@ -1728,6 +1733,9 @@ async def api_trigger_forecast_prefetch(
 
     Returns immediately. Poll /api/weather/forecast/status for progress.
     """
+    if is_demo():
+        return demo_mode_response("Wind forecast prefetch")
+
     global _prefetch_running
 
     lock = _get_prefetch_lock()
@@ -2066,6 +2074,9 @@ async def api_trigger_wave_forecast_prefetch(
     lon_max: float = Query(40.0),
 ):
     """Trigger background download of CMEMS wave forecast (0-120h)."""
+    if is_demo():
+        return demo_mode_response("Wave forecast prefetch")
+
     global _wave_prefetch_running
 
     # Check Redis distributed lock first (cross-worker), then local lock
@@ -2340,6 +2351,9 @@ async def api_trigger_current_forecast_prefetch(
     lon_max: float = Query(40.0),
 ):
     """Trigger background download of CMEMS current forecast (0-120h)."""
+    if is_demo():
+        return demo_mode_response("Current forecast prefetch")
+
     global _current_prefetch_running
 
     if _is_current_prefetch_running():
@@ -2645,6 +2659,9 @@ async def api_trigger_ice_forecast_prefetch(
     lon_max: float = Query(40.0),
 ):
     """Trigger background download of CMEMS ice forecast (10-day daily)."""
+    if is_demo():
+        return demo_mode_response("Ice forecast prefetch")
+
     global _ice_prefetch_running
 
     if _is_ice_prefetch_running():
@@ -2894,6 +2911,9 @@ async def api_trigger_sst_forecast_prefetch(
     lon_max: float = Query(40.0),
 ):
     """Trigger background download of CMEMS SST forecast (0-120h, 3h steps)."""
+    if is_demo():
+        return demo_mode_response("SST forecast prefetch")
+
     global _sst_prefetch_running
 
     if _is_sst_prefetch_running():
@@ -3116,6 +3136,9 @@ async def api_trigger_vis_forecast_prefetch(
     lon_max: float = Query(40.0),
 ):
     """Trigger background download of GFS visibility forecast (0-120h, 3h steps)."""
+    if is_demo():
+        return demo_mode_response("Visibility forecast prefetch")
+
     global _vis_prefetch_running
 
     if _is_vis_prefetch_running():
@@ -4021,7 +4044,8 @@ async def calculate_voyage(request: VoyageRequest):
     )
 
 
-@app.post("/api/voyage/monte-carlo", response_model=MonteCarloResponse)
+@app.post("/api/voyage/monte-carlo", response_model=MonteCarloResponse,
+           dependencies=[Depends(require_not_demo("Monte Carlo simulation"))])
 async def monte_carlo_simulation(request: MonteCarloRequest):
     """
     Run Monte Carlo simulation on a voyage.
@@ -4198,7 +4222,8 @@ async def get_weather_along_route(
 # API Endpoints - Route Optimization (Layer 4)
 # ============================================================================
 
-@app.post("/api/optimize/route", response_model=OptimizationResponse)
+@app.post("/api/optimize/route", response_model=OptimizationResponse,
+           dependencies=[Depends(require_not_demo("Route optimization"))])
 async def optimize_route(request: OptimizationRequest):
     """
     Find optimal route through weather.
@@ -5190,6 +5215,10 @@ async def startup_event():
     """Run migrations and start background weather ingestion."""
     _run_weather_migrations()
 
+    if is_demo():
+        logger.info("Demo mode active — skipping background weather ingestion")
+        return
+
     # Start background ingestion loop
     if weather_ingestion is not None:
         asyncio.create_task(_ingestion_loop())
@@ -5245,6 +5274,9 @@ async def _ingestion_loop():
 @app.post("/api/weather/ingest", tags=["Weather"])
 async def trigger_weather_ingestion():
     """Trigger an immediate weather ingestion cycle."""
+    if is_demo():
+        return demo_mode_response("Weather ingestion")
+
     global _ingestion_running
 
     if weather_ingestion is None:
