@@ -92,11 +92,15 @@ from src.data.land_mask import is_ocean
 _ocean_mask_cache: Dict[str, tuple] = {}
 
 
-def _build_ocean_mask(lat_min, lat_max, lon_min, lon_max, step=0.05):
+def _build_ocean_mask(lat_min, lat_max, lon_min, lon_max, step=None):
     """Build ocean mask using vectorized numpy calls.
 
     Results are cached by bounding box since the land/ocean boundary is static.
+    In demo mode uses 0.1° step (visually identical to 0.05° on screen, 4× smaller JSON).
     """
+    if step is None:
+        from api.demo import is_demo
+        step = 0.1 if is_demo() else 0.05
     cache_key = f"{lat_min:.2f}_{lat_max:.2f}_{lon_min:.2f}_{lon_max:.2f}_{step}"
     if cache_key in _ocean_mask_cache:
         return _ocean_mask_cache[cache_key]
@@ -1569,6 +1573,31 @@ async def api_ensure_all_weather(req: EnsureAllRequest):
     return {"sources": result, "elapsed_ms": elapsed_ms}
 
 
+@app.get("/api/weather/ocean-mask", tags=["Weather"])
+async def api_get_ocean_mask(
+    lat_min: float = Query(30.0, ge=-90, le=90),
+    lat_max: float = Query(60.0, ge=-90, le=90),
+    lon_min: float = Query(-15.0, ge=-180, le=180),
+    lon_max: float = Query(40.0, ge=-180, le=180),
+):
+    """Dedicated ocean mask endpoint. Cached for 24h — fetch once per session."""
+    mask_lats, mask_lons, ocean_mask = _build_ocean_mask(
+        lat_min, lat_max, lon_min, lon_max
+    )
+    import json as _json
+    from starlette.responses import Response as _Resp
+    content = _json.dumps({
+        "ocean_mask": ocean_mask,
+        "ocean_mask_lats": mask_lats,
+        "ocean_mask_lons": mask_lons,
+    })
+    return _Resp(
+        content=content,
+        media_type="application/json",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 @app.get("/api/weather/wind")
 async def api_get_wind_field(
     lat_min: float = Query(30.0, ge=-90, le=90),
@@ -1605,7 +1634,7 @@ async def api_get_wind_field(
 
     # High-resolution ocean mask (0.05° ≈ 5.5km) via vectorized numpy
     mask_lats, mask_lons, ocean_mask = _build_ocean_mask(
-        lat_min, lat_max, lon_min, lon_max, step=0.05
+        lat_min, lat_max, lon_min, lon_max
     )
 
     # SPEC-P1: Piggyback SST on wind endpoint (same bounding box)
@@ -2229,16 +2258,20 @@ def _rebuild_wave_cache_from_db(cache_key, lat_min, lat_max, lon_min, lon_max):
 
     logger.info(f"Rebuilding wave cache from DB: {len(hours)} hours")
 
-    params = [
-        "wave_hs",
-        "wave_dir",
-        "swell_hs",
-        "swell_tp",
-        "swell_dir",
-        "windwave_hs",
-        "windwave_tp",
-        "windwave_dir",
-    ]
+    # Demo: only essential params (wave_hs + wave_dir) — 4× fewer DB reads
+    if is_demo():
+        params = ["wave_hs", "wave_dir"]
+    else:
+        params = [
+            "wave_hs",
+            "wave_dir",
+            "swell_hs",
+            "swell_tp",
+            "swell_dir",
+            "windwave_hs",
+            "windwave_tp",
+            "windwave_dir",
+        ]
     grids = db_weather.get_grids_for_timeline(
         "cmems_wave", params, lat_min, lat_max, lon_min, lon_max, hours
     )
@@ -3914,7 +3947,7 @@ async def api_get_wave_field(
 
     # High-resolution ocean mask (0.05° ≈ 5.5km) via vectorized numpy
     mask_lats, mask_lons, ocean_mask = _build_ocean_mask(
-        lat_min, lat_max, lon_min, lon_max, step=0.05
+        lat_min, lat_max, lon_min, lon_max
     )
 
     # Build response with combined data
@@ -4211,7 +4244,7 @@ async def api_get_sst_field(
         sst_data = get_sst_field(lat_min, lat_max, lon_min, lon_max, resolution, time)
 
     mask_lats, mask_lons, ocean_mask = _build_ocean_mask(
-        lat_min, lat_max, lon_min, lon_max, step=0.05
+        lat_min, lat_max, lon_min, lon_max
     )
 
     response = {
@@ -4281,7 +4314,7 @@ async def api_get_visibility_field(
         )
 
     mask_lats, mask_lons, ocean_mask = _build_ocean_mask(
-        lat_min, lat_max, lon_min, lon_max, step=0.05
+        lat_min, lat_max, lon_min, lon_max
     )
 
     response = {
@@ -4347,7 +4380,7 @@ async def api_get_ice_field(
         ice_data = get_ice_field(lat_min, lat_max, lon_min, lon_max, resolution, time)
 
     mask_lats, mask_lons, ocean_mask = _build_ocean_mask(
-        lat_min, lat_max, lon_min, lon_max, step=0.05
+        lat_min, lat_max, lon_min, lon_max
     )
 
     response = {
@@ -4413,7 +4446,7 @@ async def api_get_swell_field(
         wave_data = get_wave_field(lat_min, lat_max, lon_min, lon_max, resolution)
 
     mask_lats, mask_lons, ocean_mask = _build_ocean_mask(
-        lat_min, lat_max, lon_min, lon_max, step=0.05
+        lat_min, lat_max, lon_min, lon_max
     )
 
     # Build swell decomposition response
