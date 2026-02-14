@@ -20,6 +20,11 @@ interface FreshnessInfo {
   latest_ingestion: string;
 }
 
+interface LayerAvailability {
+  layers: Record<string, boolean>;
+  forecast_hours: Record<string, number>;
+}
+
 export default function MapOverlayControls({
   weatherLayer,
   onWeatherLayerChange,
@@ -29,6 +34,22 @@ export default function MapOverlayControls({
   onRefresh,
 }: MapOverlayControlsProps) {
   const [freshness, setFreshness] = useState<FreshnessInfo | null>(null);
+  const [availability, setAvailability] = useState<LayerAvailability | null>(null);
+
+  // Fetch layer availability on mount
+  useEffect(() => {
+    const fetchAvailability = async () => {
+      try {
+        const res = await fetch(`${API_URL}/api/weather/layers/availability`);
+        if (!res.ok) return;
+        const data: LayerAvailability = await res.json();
+        setAvailability(data);
+      } catch {
+        // Silently ignore — all buttons stay enabled
+      }
+    };
+    fetchAvailability();
+  }, []);
 
   useEffect(() => {
     const fetchFreshness = async () => {
@@ -65,48 +86,60 @@ export default function MapOverlayControls({
         : 'text-red-400'
     : 'text-gray-500';
 
+  const isLayerAvailable = (layer: string): boolean => {
+    if (!availability) return true; // Not loaded yet — assume available
+    return availability.layers[layer] ?? true;
+  };
+
   return (
     <div className="absolute top-3 right-3 z-[1000] flex flex-col gap-1.5">
       <OverlayButton
         icon={<Wind className="w-4 h-4" />}
         label="Wind"
         active={weatherLayer === 'wind'}
+        disabled={!isLayerAvailable('wind')}
         onClick={() => onWeatherLayerChange(weatherLayer === 'wind' ? 'none' : 'wind')}
       />
       <OverlayButton
         icon={<Waves className="w-4 h-4" />}
         label="Waves"
         active={weatherLayer === 'waves'}
+        disabled={!isLayerAvailable('waves')}
         onClick={() => onWeatherLayerChange(weatherLayer === 'waves' ? 'none' : 'waves')}
       />
       <OverlayButton
         icon={<Droplets className="w-4 h-4" />}
         label="Currents"
         active={weatherLayer === 'currents'}
+        disabled={!isLayerAvailable('currents')}
         onClick={() => onWeatherLayerChange(weatherLayer === 'currents' ? 'none' : 'currents')}
       />
       <OverlayButton
         icon={<Snowflake className="w-4 h-4" />}
         label="Ice"
         active={weatherLayer === 'ice'}
+        disabled={!isLayerAvailable('ice')}
         onClick={() => onWeatherLayerChange(weatherLayer === 'ice' ? 'none' : 'ice')}
       />
       <OverlayButton
         icon={<CloudFog className="w-4 h-4" />}
         label="Visibility"
         active={weatherLayer === 'visibility'}
+        disabled={!isLayerAvailable('visibility')}
         onClick={() => onWeatherLayerChange(weatherLayer === 'visibility' ? 'none' : 'visibility')}
       />
       <OverlayButton
         icon={<Thermometer className="w-4 h-4" />}
         label="SST"
         active={weatherLayer === 'sst'}
+        disabled={!isLayerAvailable('sst')}
         onClick={() => onWeatherLayerChange(weatherLayer === 'sst' ? 'none' : 'sst')}
       />
       <OverlayButton
         icon={<AudioWaveform className="w-4 h-4" />}
         label="Swell"
         active={weatherLayer === 'swell'}
+        disabled={!isLayerAvailable('swell')}
         onClick={() => onWeatherLayerChange(weatherLayer === 'swell' ? 'none' : 'swell')}
       />
       {weatherLayer !== 'none' && (
@@ -139,25 +172,33 @@ function OverlayButton({
   icon,
   label,
   active,
+  disabled,
   onClick,
 }: {
   icon: React.ReactNode;
   label: string;
   active: boolean;
+  disabled?: boolean;
   onClick: () => void;
 }) {
   return (
     <button
-      onClick={onClick}
+      onClick={disabled ? undefined : onClick}
+      disabled={disabled}
+      title={disabled ? 'No data available' : undefined}
       className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs backdrop-blur-sm border transition-colors ${
-        active
-          ? 'bg-primary-500/30 border-primary-500/50 text-primary-300'
-          : 'bg-maritime-dark/90 border-white/10 text-gray-400 hover:text-white'
+        disabled
+          ? 'bg-maritime-dark/60 border-white/5 text-gray-600 cursor-not-allowed'
+          : active
+            ? 'bg-primary-500/30 border-primary-500/50 text-primary-300'
+            : 'bg-maritime-dark/90 border-white/10 text-gray-400 hover:text-white'
       }`}
     >
       {icon}
       <span>{label}</span>
-      {active ? (
+      {disabled ? (
+        <span className="ml-auto text-[10px] text-gray-600">N/A</span>
+      ) : active ? (
         <Eye className="w-3 h-3 ml-auto" />
       ) : (
         <EyeOff className="w-3 h-3 ml-auto" />

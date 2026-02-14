@@ -1532,7 +1532,24 @@ async def api_ensure_all_weather(req: EnsureAllRequest):
     Returns status per source and total elapsed time.
     """
     if is_demo():
-        return demo_mode_response("Weather ingestion")
+        # In demo mode, verify DB snapshot is loaded (no external API calls).
+        # Use max_age_hours=87600 (10 years) since snapshot data is static.
+        if db_weather is None:
+            raise HTTPException(status_code=503, detail="Database not ready")
+        sources = {
+            "gfs_wind": "gfs",
+            "cmems_wave": "cmems_wave",
+            "cmems_current": "cmems_current",
+            "cmems_ice": "cmems_ice",
+        }
+        sources_status = {}
+        for label, source in sources.items():
+            sources_status[label] = (
+                "ready"
+                if db_weather.has_data_for_source(source, max_age_hours=87600)
+                else "empty"
+            )
+        return {"sources": sources_status, "elapsed_ms": 0}
 
     import time as _time
 
@@ -1595,6 +1612,92 @@ async def api_get_ocean_mask(
         content=content,
         media_type="application/json",
         headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@app.get("/api/weather/layers/availability", tags=["Weather"])
+async def api_get_layer_availability():
+    """Return which weather layers have data in the DB.
+
+    Used by the frontend to disable layer buttons for empty sources.
+    Response is cached for 1 hour.
+    """
+    from starlette.responses import Response as _Resp
+    import json as _json
+
+    layers = {
+        "wind": False,
+        "waves": False,
+        "currents": False,
+        "ice": False,
+        "visibility": False,
+        "sst": False,
+        "swell": False,
+    }
+    forecast_hours = {
+        "wind": 0,
+        "waves": 0,
+        "currents": 0,
+        "ice": 0,
+    }
+
+    if db_weather is not None:
+        conn = db_weather._get_conn()
+        try:
+            cur = conn.cursor()
+            # Count distinct forecast hours per source
+            cur.execute(
+                """SELECT source, COUNT(DISTINCT forecast_hour) as hours
+                   FROM weather_grids
+                   GROUP BY source"""
+            )
+            for row in cur.fetchall():
+                src, hours = row
+                if src == "gfs":
+                    layers["wind"] = hours > 0
+                    forecast_hours["wind"] = hours
+                elif src == "cmems_wave":
+                    layers["waves"] = hours > 0
+                    forecast_hours["waves"] = hours
+                    # Swell is available only if wave data includes swell params
+                    cur2 = conn.cursor()
+                    cur2.execute(
+                        """SELECT COUNT(*) FROM weather_grids
+                           WHERE source = 'cmems_wave'
+                           AND parameter = 'swell_hs' LIMIT 1"""
+                    )
+                    layers["swell"] = cur2.fetchone()[0] > 0
+                elif src == "cmems_current":
+                    layers["currents"] = hours > 0
+                    forecast_hours["currents"] = hours
+                elif src == "cmems_ice":
+                    layers["ice"] = hours > 0
+                    forecast_hours["ice"] = hours
+
+            # Check for visibility and SST data
+            for param, layer_name in [
+                ("visibility", "visibility"),
+                ("sst", "sst"),
+            ]:
+                cur.execute(
+                    """SELECT COUNT(*) FROM weather_grids
+                       WHERE parameter = %s LIMIT 1""",
+                    (param,),
+                )
+                layers[layer_name] = cur.fetchone()[0] > 0
+        except Exception as e:
+            logger.warning(f"Layer availability check failed: {e}")
+        finally:
+            conn.close()
+
+    content = _json.dumps({
+        "layers": layers,
+        "forecast_hours": forecast_hours,
+    })
+    return _Resp(
+        content=content,
+        media_type="application/json",
+        headers={"Cache-Control": "public, max-age=3600"},
     )
 
 
@@ -1957,6 +2060,29 @@ async def api_get_forecast_status(
 
     Checks the file cache first (instant). Falls back to scanning GRIB files.
     """
+    if is_demo():
+        # In demo, wind frames come from DB rebuild — skip GFS GRIB scanning.
+        # Return status that triggers the direct-load fallback path in the frontend.
+        cache_key = _wind_cache_key(lat_min, lat_max, lon_min, lon_max)
+        cached = _wind_cache_get(cache_key)
+        if cached:
+            return {
+                "run_date": cached.get("run_date", "demo"),
+                "run_hour": cached.get("run_hour", "00"),
+                "total_hours": cached.get("total_hours", 41),
+                "cached_hours": len(cached.get("frames", {})),
+                "complete": True,
+                "prefetch_running": False,
+            }
+        return {
+            "run_date": "demo",
+            "run_hour": "00",
+            "total_hours": 41,
+            "cached_hours": 0,
+            "complete": False,
+            "prefetch_running": False,
+        }
+
     cache_key = _wind_cache_key(lat_min, lat_max, lon_min, lon_max)
     cached = _wind_cache_get(cache_key)
     if cached and not _prefetch_running:
@@ -6562,6 +6688,16 @@ async def calculate_cii_reduction(request: CIIReductionRequest):
 @app.get("/api/weather/freshness", tags=["Weather"])
 async def get_weather_freshness():
     """Get weather data freshness indicator (age of most recent data)."""
+    if is_demo():
+        # In demo mode, report data as current to avoid stale-data toasts.
+        # The snapshot is static — there's nothing to refresh.
+        return {
+            "status": "ok",
+            "age_hours": 0,
+            "color": "green",
+            "message": "Demo snapshot data",
+        }
+
     if db_weather is None:
         return {
             "status": "unavailable",
