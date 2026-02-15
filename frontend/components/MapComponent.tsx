@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import { Loader2 } from 'lucide-react';
-import { Position, WindFieldData, WaveFieldData, VelocityData, CreateZoneRequest, WaveForecastFrames, IceForecastFrames, SstForecastFrames, VisForecastFrames, AllOptimizationResults, RouteVisibility, OptimizedRouteKey, ROUTE_STYLES } from '@/lib/api';
+import { Position, WindFieldData, WaveFieldData, VelocityData, DbWindFrame, ForecastFrames, CreateZoneRequest, WaveForecastFrames, IceForecastFrames, SstForecastFrames, VisForecastFrames, AllOptimizationResults, RouteVisibility, OptimizedRouteKey, ROUTE_STYLES } from '@/lib/api';
 import { DEMO_MODE, DEMO_BOUNDS } from '@/lib/demoMode';
 
 // Dynamic imports for map components (client-side only)
@@ -89,7 +89,7 @@ export interface MapComponentProps {
   onCancelZone?: () => void;
   forecastEnabled?: boolean;
   onForecastClose?: () => void;
-  onForecastHourChange?: (hour: number, data: VelocityData[] | null) => void;
+  onForecastHourChange?: (hour: number, data: VelocityData[] | DbWindFrame | null, meta?: ForecastFrames | null) => void;
   onWaveForecastHourChange?: (hour: number, allFrames: WaveForecastFrames | null) => void;
   onCurrentForecastHourChange?: (hour: number, allFrames: any | null) => void;
   onIceForecastHourChange?: (hour: number, allFrames: IceForecastFrames | null) => void;

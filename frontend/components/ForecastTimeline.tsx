@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Play, Pause, X, Clock, Loader2, Info } from 'lucide-react';
-import { apiClient, VelocityData, ForecastFrames, WaveForecastFrames, WaveForecastFrame, CurrentForecastFrames, IceForecastFrames, SstForecastFrames, VisForecastFrames } from '@/lib/api';
+import { apiClient, VelocityData, ForecastFrames, DbWindFrame, WaveForecastFrames, WaveForecastFrame, CurrentForecastFrames, IceForecastFrames, SstForecastFrames, VisForecastFrames } from '@/lib/api';
 import { debugLog } from '@/lib/debugLog';
 
 type LayerType = 'wind' | 'waves' | 'currents' | 'ice' | 'swell' | 'sst' | 'visibility';
@@ -17,7 +17,7 @@ export interface ViewportBounds {
 interface ForecastTimelineProps {
   visible: boolean;
   onClose: () => void;
-  onForecastHourChange: (hour: number, data: VelocityData[] | null) => void;
+  onForecastHourChange: (hour: number, data: VelocityData[] | DbWindFrame | null, meta?: ForecastFrames | null) => void;
   /** Callback for wave forecast frame changes */
   onWaveForecastHourChange?: (hour: number, frame: WaveForecastFrames | null) => void;
   /** Callback for current forecast frame changes */
@@ -95,9 +95,11 @@ export default function ForecastTimeline({
   const sliderMax = activeHours.length > 0 ? activeHours[activeHours.length - 1] : 0;
   const sliderStep = activeHours.length >= 2 ? activeHours[1] - activeHours[0] : (isIceMode ? 24 : 3);
 
-  // Wind frames
-  const [windFrames, setWindFrames] = useState<Record<string, VelocityData[]>>({});
-  const windFramesRef = useRef<Record<string, VelocityData[]>>({});
+  // Wind frames (can be GFS VelocityData[] or DB-rebuilt DbWindFrame per hour)
+  const [windFrames, setWindFrames] = useState<Record<string, VelocityData[] | DbWindFrame>>({});
+  const windFramesRef = useRef<Record<string, VelocityData[] | DbWindFrame>>({});
+  // Full ForecastFrames response (stores grid metadata for DB-format frames)
+  const windFramesMetaRef = useRef<ForecastFrames | null>(null);
 
   // Wave frames (full response with shared metadata)
   const [waveFrameData, setWaveFrameData] = useState<WaveForecastFrames | null>(null);
@@ -170,6 +172,8 @@ export default function ForecastTimeline({
       setVisFrameData(null);
       visFrameDataRef.current = null;
       // Reset prefetch state so effects re-trigger
+      prefetchCompleteRef.current = false;
+      windFramesMetaRef.current = null;
       setPrefetchComplete(false);
       setAvailableHours([]);
       setCurrentHour(0);
@@ -186,6 +190,10 @@ export default function ForecastTimeline({
   useEffect(() => { sstFrameDataRef.current = sstFrameData; }, [sstFrameData]);
   useEffect(() => { visFrameDataRef.current = visFrameData; }, [visFrameData]);
 
+  // Synchronous guard ref: set to true BEFORE React state batching
+  // to prevent the poll interval from firing a second loadWindFrames.
+  const prefetchCompleteRef = useRef(false);
+
   // ------------------------------------------------------------------
   // Wind forecast: load all frames
   // ------------------------------------------------------------------
@@ -195,11 +203,14 @@ export default function ForecastTimeline({
       const bp = bounds ?? boundsRef.current ?? {};
       const data: ForecastFrames = await apiClient.getForecastFrames(bp);
       setWindFrames(data.frames);
+      windFramesMetaRef.current = data;
       setAvailableHours(deriveHoursFromFrames(data.frames));
       setRunTime(`${data.run_date} ${data.run_hour}Z`);
+      // Set ref synchronously BEFORE React batches the state update
+      prefetchCompleteRef.current = true;
       setPrefetchComplete(true);
       setIsLoading(false);
-      if (data.frames['0']) onForecastHourChange(0, data.frames['0']);
+      if (data.frames['0']) onForecastHourChange(0, data.frames['0'], data);
     } catch (e) {
       console.error('Failed to load wind forecast frames:', e);
       setIsLoading(false);
@@ -262,9 +273,10 @@ export default function ForecastTimeline({
     // Client-side cache hit — restore UI state instantly, skip network
     if (Object.keys(windFramesRef.current).length > 0) {
       setAvailableHours(deriveHoursFromFrames(windFramesRef.current));
+      prefetchCompleteRef.current = true;
       setPrefetchComplete(true);
       setIsLoading(false);
-      if (windFramesRef.current['0']) onForecastHourChange(0, windFramesRef.current['0']);
+      if (windFramesRef.current['0']) onForecastHourChange(0, windFramesRef.current['0'], windFramesMetaRef.current);
       return;
     }
 
@@ -273,11 +285,12 @@ export default function ForecastTimeline({
 
     const start = async () => {
       setIsLoading(true);
+      prefetchCompleteRef.current = false;
       setPrefetchComplete(false);
       try {
         await apiClient.triggerForecastPrefetch(bp);
         const poll = async () => {
-          if (cancelled) return;
+          if (cancelled || prefetchCompleteRef.current) return;
           try {
             const st = await apiClient.getForecastStatus(bp);
             setLoadProgress({ cached: st.cached_hours, total: st.total_hours });
@@ -293,7 +306,8 @@ export default function ForecastTimeline({
           } catch (e) { console.error('Wind forecast poll failed:', e); }
         };
         await poll();
-        if (!cancelled && pollIntervalRef.current === null && !prefetchComplete) {
+        // Only start poll interval if prefetch hasn't already completed (ref check prevents double-load)
+        if (!cancelled && pollIntervalRef.current === null && !prefetchCompleteRef.current) {
           pollIntervalRef.current = setInterval(poll, 3000);
         }
       } catch (e) {
@@ -612,7 +626,7 @@ export default function ForecastTimeline({
             const nextHour = hrs[nextIdx];
 
             if (isWindMode) {
-              onForecastHourChange(nextHour, windFramesRef.current[String(nextHour)] || null);
+              onForecastHourChange(nextHour, windFramesRef.current[String(nextHour)] || null, windFramesMetaRef.current);
             } else if (isWaveMode && onWaveForecastHourChange && waveFrameDataRef.current) {
               onWaveForecastHourChange(nextHour, waveFrameDataRef.current);
             } else if (isCurrentMode && onCurrentForecastHourChange && currentFrameDataRef.current) {
@@ -647,7 +661,7 @@ export default function ForecastTimeline({
     sliderRafRef.current = requestAnimationFrame(() => {
       sliderRafRef.current = null;
       if (isWindMode) {
-        onForecastHourChange(hour, windFrames[String(hour)] || null);
+        onForecastHourChange(hour, windFrames[String(hour)] || null, windFramesMetaRef.current);
       } else if (isWaveMode && onWaveForecastHourChange && waveFrameData) {
         onWaveForecastHourChange(hour, waveFrameData);
       } else if (isCurrentMode && onCurrentForecastHourChange && currentFrameData) {
@@ -785,6 +799,37 @@ export default function ForecastTimeline({
     return 'text-gray-500';
   })();
   const hasData = sourceColor === 'text-green-400';
+
+  // Single-frame snapshot: show a compact info bar instead of the full scrubber
+  if (activeHours.length <= 1 && prefetchComplete) {
+    return (
+      <div className="absolute bottom-0 left-0 right-0 z-[1001] bg-maritime-dark/95 backdrop-blur-sm border-t border-white/10">
+        <div className="px-4 py-3 flex items-center gap-4">
+          <div className="flex-shrink-0 w-9 h-9 flex items-center justify-center rounded-full bg-gray-700 text-gray-400">
+            <Info className="w-4 h-4" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-1.5 text-white text-sm font-medium">
+              <Clock className="w-3.5 h-3.5 text-primary-400" />
+              <span>{layerLabel} — Single snapshot</span>
+              {runTime && (
+                <>
+                  <span className="text-gray-400 text-xs">|</span>
+                  <span className="text-gray-300 text-xs">Run {runTime}</span>
+                </>
+              )}
+            </div>
+            <div className="text-xs text-gray-500 mt-0.5">
+              Only one forecast hour available in the database snapshot
+            </div>
+          </div>
+          <button onClick={handleClose} className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded text-gray-400 hover:text-white hover:bg-gray-700 transition-colors">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="absolute bottom-0 left-0 right-0 z-[1001] bg-maritime-dark/95 backdrop-blur-sm border-t border-white/10">

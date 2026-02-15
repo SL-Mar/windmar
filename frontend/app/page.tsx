@@ -6,9 +6,10 @@ import Header from '@/components/Header';
 import MapOverlayControls from '@/components/MapOverlayControls';
 import AnalysisPanel from '@/components/AnalysisPanel';
 import { useVoyage } from '@/components/VoyageContext';
-import { apiClient, Position, WindFieldData, WaveFieldData, VelocityData, OptimizationResponse, CreateZoneRequest, WaveForecastFrames, IceForecastFrames, SstForecastFrames, VisForecastFrames, OptimizedRouteKey, AllOptimizationResults, EMPTY_ALL_RESULTS } from '@/lib/api';
+import { apiClient, Position, WindFieldData, WaveFieldData, VelocityData, OptimizationResponse, CreateZoneRequest, WaveForecastFrames, IceForecastFrames, SstForecastFrames, VisForecastFrames, OptimizedRouteKey, AllOptimizationResults, EMPTY_ALL_RESULTS, ForecastFrames, DbWindFrame, isDbWindFrame } from '@/lib/api';
 import { getAnalyses, saveAnalysis, deleteAnalysis, updateAnalysisMonteCarlo, AnalysisEntry } from '@/lib/analysisStorage';
 import { debugLog } from '@/lib/debugLog';
+import { DEMO_MODE } from '@/lib/demoMode';
 import DebugConsole from '@/components/DebugConsole';
 import { useToast } from '@/components/Toast';
 
@@ -80,7 +81,13 @@ export default function HomePage() {
   }, []);
 
   // Startup: ensure all weather sources are cached in DB
+  // In demo mode, data is pre-loaded in the DB snapshot — skip the round-trip.
   useEffect(() => {
+    if (DEMO_MODE) {
+      debugLog('info', 'WEATHER', 'Demo mode — skipping ensure-all, weather ready immediately');
+      setWeatherReady(true);
+      return;
+    }
     let cancelled = false;
     const ensureWeather = async () => {
       setWeatherEnsuring(true);
@@ -107,8 +114,9 @@ export default function HomePage() {
   }, []);
 
   // Startup freshness check: after weather data is ready, show data age toast
+  // In demo mode, data is a static snapshot — freshness check is meaningless.
   useEffect(() => {
-    if (!weatherReady) return;
+    if (!weatherReady || DEMO_MODE) return;
     let cancelled = false;
     const checkFreshness = async () => {
       try {
@@ -263,9 +271,14 @@ export default function HomePage() {
   }, [weatherLayer]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Handle wind forecast hour change from timeline
-  const handleForecastHourChange = useCallback((hour: number, data: VelocityData[] | null) => {
+  // Supports two frame formats:
+  //   1. GFS/velocity format: VelocityData[] with flat arrays + GRIB2 headers
+  //   2. DB-rebuilt format: DbWindFrame { u: number[][], v: number[][] } with grid meta on the parent response
+  const handleForecastHourChange = useCallback((hour: number, data: VelocityData[] | DbWindFrame | null, meta?: ForecastFrames | null) => {
     setForecastHour(hour);
-    if (data && data.length >= 2) {
+
+    // Case 1: GFS velocity format (Array of 2+ VelocityData with flat u/v)
+    if (Array.isArray(data) && data.length >= 2) {
       setWindVelocityData(data);
 
       // Lazy-cache: build WindFieldData once per (run, hour), reuse on loops
@@ -312,7 +325,80 @@ export default function HomePage() {
         windFieldCacheRef.current[key] = field;
       }
       setWindData(field);
-    } else if (hour === 0) {
+      return;
+    }
+
+    // Case 2: DB-rebuilt format (object with u/v 2D arrays + grid metadata on parent ForecastFrames)
+    if (isDbWindFrame(data) && meta?.lats && meta?.lons) {
+      const lats = meta.lats;
+      const lons = meta.lons;
+      const ny = lats.length;
+      const nx = lons.length;
+
+      // Build WindFieldData for the grid overlay
+      const key = String(hour);
+      const version = meta.run_time || '';
+      if (version !== windFieldCacheVersionRef.current) {
+        windFieldCacheRef.current = {};
+        windFieldCacheVersionRef.current = version;
+      }
+      let field = windFieldCacheRef.current[key];
+      if (!field) {
+        const base = windDataBaseRef.current;
+        field = {
+          parameter: 'wind',
+          time: version,
+          bbox: {
+            lat_min: Math.min(lats[0], lats[lats.length - 1]),
+            lat_max: Math.max(lats[0], lats[lats.length - 1]),
+            lon_min: lons[0],
+            lon_max: lons[lons.length - 1],
+          },
+          resolution: lons.length > 1 ? Math.abs(lons[1] - lons[0]) : 1,
+          nx, ny, lats, lons,
+          u: data.u, v: data.v,
+          ocean_mask: meta.ocean_mask ?? base?.ocean_mask,
+          ocean_mask_lats: meta.ocean_mask_lats ?? base?.ocean_mask_lats,
+          ocean_mask_lons: meta.ocean_mask_lons ?? base?.ocean_mask_lons,
+        };
+        windFieldCacheRef.current[key] = field;
+      }
+      setWindData(field);
+
+      // Build VelocityData[] for the particle (leaflet-velocity) layer.
+      // Lats in DB frames are S-to-N; leaflet-velocity expects N-to-S (la1 > la2).
+      const la1 = lats[lats.length - 1]; // northernmost
+      const la2 = lats[0];               // southernmost
+      const dx = lons.length > 1 ? Math.abs(lons[1] - lons[0]) : 1;
+      const dy = lats.length > 1 ? Math.abs(lats[1] - lats[0]) : 1;
+      const uFlat: number[] = [];
+      const vFlat: number[] = [];
+      // Flip row order: iterate from last row (north) to first (south)
+      for (let j = ny - 1; j >= 0; j--) {
+        for (let i = 0; i < nx; i++) {
+          uFlat.push(data.u[j]?.[i] ?? 0);
+          vFlat.push(data.v[j]?.[i] ?? 0);
+        }
+      }
+      const header = {
+        parameterCategory: 2,
+        parameterNumber: 2,
+        lo1: lons[0],
+        la1,
+        lo2: lons[lons.length - 1],
+        la2,
+        dx, dy, nx, ny,
+        refTime: version,
+      };
+      setWindVelocityData([
+        { header: { ...header, parameterNumber: 2 }, data: uFlat },
+        { header: { ...header, parameterNumber: 3 }, data: vFlat },
+      ]);
+      return;
+    }
+
+    // Case 3: null/reset — reload base weather data
+    if (hour === 0) {
       loadWeatherData();
     }
   }, [loadWeatherData]);

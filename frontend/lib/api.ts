@@ -253,6 +253,23 @@ export interface VelocityData {
   data: number[];
 }
 
+/** DB-rebuilt wind frame format: 2D u/v arrays (from _rebuild_wind_cache_from_db). */
+export interface DbWindFrame {
+  u: number[][];
+  v: number[][];
+}
+
+/** Type guard: true when the value is a DB-format wind frame (object with u/v 2D arrays). */
+export function isDbWindFrame(v: unknown): v is DbWindFrame {
+  return (
+    v !== null &&
+    typeof v === 'object' &&
+    !Array.isArray(v) &&
+    'u' in (v as Record<string, unknown>) &&
+    'v' in (v as Record<string, unknown>)
+  );
+}
+
 export interface PointWeather {
   position: { lat: number; lon: number };
   time: string;
@@ -291,7 +308,15 @@ export interface ForecastFrames {
   total_hours: number;
   cached_hours: number;
   source?: string;
-  frames: Record<string, VelocityData[]>;
+  frames: Record<string, VelocityData[] | DbWindFrame>;
+  /** Grid metadata (present when frames are DB-rebuilt). */
+  lats?: number[];
+  lons?: number[];
+  ny?: number;
+  nx?: number;
+  ocean_mask?: boolean[][];
+  ocean_mask_lats?: number[];
+  ocean_mask_lons?: number[];
 }
 
 // Voyage types
