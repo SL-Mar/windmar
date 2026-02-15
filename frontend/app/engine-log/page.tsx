@@ -475,9 +475,14 @@ function AnalyticsSection({ summary }: { summary: EngineLogSummaryResponse | nul
     );
   }
 
-  const dateRange = summary?.date_range
-    ? `${summary.date_range.start?.slice(0, 10) || '?'} \u2013 ${summary.date_range.end?.slice(0, 10) || '?'}`
-    : '\u2014';
+  const fmtShortDate = (iso: string | null | undefined): string => {
+    if (!iso) return '?';
+    const d = new Date(iso);
+    return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' });
+  };
+
+  const dateStart = summary?.date_range ? fmtShortDate(summary.date_range.start) : '\u2014';
+  const dateEnd = summary?.date_range ? fmtShortDate(summary.date_range.end) : '';
 
   const totalFuel = summary?.fuel_summary
     ? (summary.fuel_summary.hfo_mt + summary.fuel_summary.mgo_mt + summary.fuel_summary.methanol_mt).toFixed(1)
@@ -492,11 +497,18 @@ function AnalyticsSection({ summary }: { summary: EngineLogSummaryResponse | nul
           value={summary?.total_entries ?? 0}
           icon={<Database className="w-5 h-5" />}
         />
-        <StatCard
-          label="Date Range"
-          value={dateRange}
-          icon={<Calendar className="w-5 h-5" />}
-        />
+        <Card>
+          <div className="flex items-start justify-between">
+            <div className="flex-1">
+              <p className="text-sm text-gray-400 mb-2">Date Range</p>
+              <p className="text-lg font-bold text-white leading-tight">{dateStart}</p>
+              {dateEnd && <p className="text-lg font-bold text-white leading-tight">{dateEnd}</p>}
+            </div>
+            <div className="p-3 rounded-lg bg-white/5">
+              <Calendar className="w-5 h-5" />
+            </div>
+          </div>
+        </Card>
         <StatCard
           label="Avg RPM at Sea"
           value={summary?.avg_rpm_at_sea?.toFixed(0) ?? '\u2014'}
@@ -518,16 +530,16 @@ function AnalyticsSection({ summary }: { summary: EngineLogSummaryResponse | nul
 
       {/* Charts 2x2 */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <Card title="Fuel Consumption Timeline" className="h-80">
+        <Card title="Fuel Consumption Timeline" className="h-96">
           <FuelTimelineChart entries={entries} />
         </Card>
-        <Card title="RPM Distribution (NOON)" className="h-80">
+        <Card title="RPM Distribution (NOON)" className="h-96">
           <RpmDistributionChart entries={entries} />
         </Card>
-        <Card title="Speed Through Water" className="h-80">
+        <Card title="Speed Through Water" className="h-96">
           <SpeedTimelineChart entries={entries} />
         </Card>
-        <Card title="Event Breakdown" className="h-80">
+        <Card title="Event Breakdown" className="h-96">
           <EventBreakdownChart eventsBreakdown={summary?.events_breakdown || {}} />
         </Card>
       </div>
