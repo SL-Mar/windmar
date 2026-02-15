@@ -7,6 +7,8 @@ import { StatCard } from '@/components/Card';
 import {
   FuelTimelineChart, RpmDistributionChart,
   SpeedTimelineChart, EventBreakdownChart,
+  PowerSpeedChart, SfocLoadChart, FuelBreakdownChart,
+  SlipSpeedChart, TurbochargerChart, ThermalProfileChart,
 } from '@/components/EngineLogCharts';
 import {
   Upload, FileSpreadsheet, Trash2, Filter, ChevronLeft, ChevronRight,
@@ -17,7 +19,7 @@ import {
   EngineLogEntriesParams, EngineLogUploadResponse, EngineLogCalibrateResponse,
 } from '@/lib/api';
 
-type EngineLogTab = 'upload' | 'entries' | 'analytics';
+type EngineLogTab = 'upload' | 'entries' | 'analytics' | 'performance';
 
 export default function EngineLogPage() {
   const [activeTab, setActiveTab] = useState<EngineLogTab>('upload');
@@ -44,11 +46,13 @@ export default function EngineLogPage() {
           <TabButton label="Upload" active={activeTab === 'upload'} onClick={() => setActiveTab('upload')} />
           <TabButton label="Entries" active={activeTab === 'entries'} onClick={() => setActiveTab('entries')} />
           <TabButton label="Analytics" active={activeTab === 'analytics'} onClick={() => setActiveTab('analytics')} />
+          <TabButton label="Performance" active={activeTab === 'performance'} onClick={() => setActiveTab('performance')} />
         </div>
 
         {activeTab === 'upload' && <UploadSection summary={summary} onRefresh={loadSummary} />}
         {activeTab === 'entries' && <EntriesSection summary={summary} />}
         {activeTab === 'analytics' && <AnalyticsSection summary={summary} />}
+        {activeTab === 'performance' && <PerformanceSection />}
       </main>
     </div>
   );
@@ -613,6 +617,104 @@ function AnalyticsSection({ summary }: { summary: EngineLogSummaryResponse | nul
         </Card>
         <Card title="Event Breakdown" className="h-96">
           <EventBreakdownChart eventsBreakdown={summary?.events_breakdown || {}} />
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+// ─── Performance Section ────────────────────────────────────────────────────
+
+function PerformanceSection() {
+  const [entries, setEntries] = useState<EngineLogEntryResponse[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const data = await apiClient.getEngineLogEntries({ limit: 1000 });
+        setEntries(data);
+      } catch (err) {
+        console.error('Failed to load performance data:', err);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary-400" />
+      </div>
+    );
+  }
+
+  const noon = entries.filter(e => e.event === 'NOON');
+
+  // KPI computations
+  const sfocVals = noon
+    .filter(e => e.hfo_me_mt != null && e.hfo_me_mt > 0 && e.me_power_kw != null && e.me_power_kw > 0 && e.lapse_hours != null && e.lapse_hours > 0)
+    .map(e => (e.hfo_me_mt! * 1e6) / (e.me_power_kw! * e.lapse_hours!))
+    .filter(v => Number.isFinite(v) && v > 50 && v < 500);
+  const avgSfoc = sfocVals.length >= 3 ? (sfocVals.reduce((a, b) => a + b, 0) / sfocVals.length).toFixed(0) : '\u2014';
+
+  const loadVals = noon.filter(e => e.me_load_pct != null).map(e => e.me_load_pct!);
+  const avgLoad = loadVals.length >= 3 ? (loadVals.reduce((a, b) => a + b, 0) / loadVals.length).toFixed(1) : '\u2014';
+
+  const slipVals = noon.filter(e => e.slip_pct != null).map(e => e.slip_pct!);
+  const avgSlip = slipVals.length >= 3 ? (slipVals.reduce((a, b) => a + b, 0) / slipVals.length).toFixed(1) : '\u2014';
+
+  const shaftEffVals = noon
+    .filter(e => e.shaft_power != null && e.shaft_power > 0 && e.me_power_kw != null && e.me_power_kw > 0)
+    .map(e => (e.shaft_power! / e.me_power_kw!) * 100)
+    .filter(v => Number.isFinite(v) && v > 0 && v <= 120);
+  const avgShaftEff = shaftEffVals.length >= 3 ? (shaftEffVals.reduce((a, b) => a + b, 0) / shaftEffVals.length).toFixed(1) : '\u2014';
+
+  // Fuel efficiency: (hfo_total + mgo_total) / log_distance
+  const fuelEffVals = noon
+    .filter(e => {
+      const logDist = e.extended_data ? Number(e.extended_data['log_distance']) : null;
+      return (e.hfo_total_mt != null || e.mgo_total_mt != null) && logDist != null && logDist > 0;
+    })
+    .map(e => {
+      const fuel = (e.hfo_total_mt ?? 0) + (e.mgo_total_mt ?? 0);
+      const dist = Number(e.extended_data!['log_distance']);
+      return fuel / dist;
+    })
+    .filter(v => Number.isFinite(v) && v > 0 && v < 1);
+  const avgFuelEff = fuelEffVals.length >= 3 ? (fuelEffVals.reduce((a, b) => a + b, 0) / fuelEffVals.length).toFixed(3) : '\u2014';
+
+  return (
+    <div className="space-y-6">
+      {/* KPI stat cards */}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+        <StatCard label="Avg SFOC" value={avgSfoc} unit="g/kWh" icon={<Gauge className="w-5 h-5" />} />
+        <StatCard label="Avg ME Load" value={avgLoad} unit="%" icon={<Activity className="w-5 h-5" />} />
+        <StatCard label="Avg Slip" value={avgSlip} unit="%" icon={<Gauge className="w-5 h-5" />} />
+        <StatCard label="Shaft Efficiency" value={avgShaftEff} unit="%" icon={<Activity className="w-5 h-5" />} />
+        <StatCard label="Fuel Efficiency" value={avgFuelEff} unit="MT/nm" icon={<Fuel className="w-5 h-5" />} />
+      </div>
+
+      {/* Charts 3x2 */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <Card title="Power-Speed Curve" className="h-96">
+          <PowerSpeedChart entries={entries} />
+        </Card>
+        <Card title="SFOC vs Engine Load" className="h-96">
+          <SfocLoadChart entries={entries} />
+        </Card>
+        <Card title="Fuel Breakdown" className="h-96">
+          <FuelBreakdownChart entries={entries} />
+        </Card>
+        <Card title="Propeller Slip & Speed" className="h-96">
+          <SlipSpeedChart entries={entries} />
+        </Card>
+        <Card title="Turbocharger Health" className="h-96">
+          <TurbochargerChart entries={entries} />
+        </Card>
+        <Card title="Thermal Profile" className="h-96">
+          <ThermalProfileChart entries={entries} />
         </Card>
       </div>
     </div>
