@@ -265,17 +265,54 @@ export default function HomePage() {
     }
   }, []);
 
-  // Sync-status check: runs once when weather is ready (health-based,
-  // independent of viewport bounds — panning does not change sync state).
+  // Startup sync: check health and auto-fix if not in sync.
+  // Forces ensure-all + polls health until sources are healthy (max 2 min).
   useEffect(() => {
     if (!weatherReady) return;
     let cancelled = false;
     (async () => {
       try {
         const status = await apiClient.getWeatherSyncStatus(
-          viewport?.bounds ?? { lat_min: -85, lat_max: 85, lon_min: -180, lon_max: 180 }
+          { lat_min: -85, lat_max: 85, lon_min: -180, lon_max: 180 }
         );
-        if (!cancelled) setSyncStatus(status);
+        if (cancelled) return;
+        setSyncStatus(status);
+
+        if (status.in_sync) return;
+
+        // Not in sync — force-refresh stale/missing sources
+        debugLog('info', 'WEATHER', 'Startup: not in sync — forcing ensure-all...');
+        setResyncRunning(true);
+        try {
+          await apiClient.ensureAllWeatherData({
+            lat_min: -85, lat_max: 85, lon_min: -179.75, lon_max: 179.75,
+            force: true,
+          });
+
+          // Poll health until all sources healthy (max 2 min, every 5s)
+          for (let i = 0; i < 24; i++) {
+            if (cancelled) return;
+            await new Promise(r => setTimeout(r, 5000));
+            try {
+              const health = await apiClient.getWeatherHealth();
+              if (health.healthy) {
+                debugLog('info', 'WEATHER', 'Startup auto-sync complete: all sources healthy');
+                break;
+              }
+              debugLog('info', 'WEATHER', `Startup auto-sync: waiting for sources... (${i + 1}/24)`);
+            } catch { break; }
+          }
+
+          const newSync = await apiClient.getWeatherSyncStatus(
+            { lat_min: -85, lat_max: 85, lon_min: -180, lon_max: 180 }
+          );
+          if (!cancelled) {
+            setSyncStatus(newSync);
+            loadWeatherData(); // reload active layer with fresh data
+          }
+        } finally {
+          if (!cancelled) setResyncRunning(false);
+        }
       } catch {
         // Silently ignore — badge just won't show
       }
