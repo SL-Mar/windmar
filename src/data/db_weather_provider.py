@@ -742,24 +742,41 @@ class DbWeatherProvider:
             conn.close()
 
     def has_data_for_source(self, source: str, max_age_hours: int = 24) -> bool:
-        """Check if a given source has a recent completed run."""
+        """Check if a given source has a recent completed run with enough frames.
+
+        Returns True only if a complete run exists that is recent AND has at
+        least 75% of the expected frame count. This prevents skipping sources
+        that were partially ingested before a container restart.
+        """
+        source_def = self.SOURCE_DEFS.get(source)
+        if not source_def:
+            return False
+        expected = source_def["expected_frames"]
+        min_frames = max(2, int(expected * 0.75))
+
         conn = self._get_conn()
         try:
             cur = conn.cursor()
             cur.execute(
-                """SELECT ingested_at FROM weather_forecast_runs
-                   WHERE source = %s AND status = 'complete'
-                   ORDER BY ingested_at DESC LIMIT 1""",
+                """SELECT r.ingested_at,
+                          (SELECT COUNT(*) FROM weather_grid_data g WHERE g.run_id = r.id)
+                   FROM weather_forecast_runs r
+                   WHERE r.source = %s AND r.status = 'complete'
+                   ORDER BY r.ingested_at DESC LIMIT 1""",
                 (source,),
             )
             row = cur.fetchone()
             if not row:
                 return False
-            ingested_at = row[0]
+            ingested_at, frame_count = row
             if ingested_at.tzinfo is None:
                 ingested_at = ingested_at.replace(tzinfo=timezone.utc)
             age = (datetime.now(timezone.utc) - ingested_at).total_seconds() / 3600
-            return age < max_age_hours
+            if age >= max_age_hours:
+                return False
+            if frame_count < min_frames:
+                return False
+            return True
         except Exception:
             return False
         finally:

@@ -98,14 +98,16 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
 
 # Run the API server with gunicorn + uvicorn workers
 # - gunicorn manages worker lifecycle with configurable timeout
-# - --timeout 120 allows long-running VISIR optimizations (~15-30s)
+# - --timeout 600 allows long-running CMEMS downloads (3-5 min each)
+#   and VISIR optimizations (~15-30s). Blocking I/O in sync ingestion
+#   functions stalls the event loop, preventing heartbeats.
 # - uvicorn workers handle async endpoints (FastAPI)
 CMD ["gunicorn", "api.main:app", \
      "--bind", "0.0.0.0:8000", \
      "--workers", "4", \
      "--worker-class", "uvicorn.workers.UvicornWorker", \
-     "--timeout", "120", \
-     "--graceful-timeout", "30", \
+     "--timeout", "600", \
+     "--graceful-timeout", "60", \
      "--forwarded-allow-ips", "*", \
      "--access-logfile", "-", \
      "--log-level", "info"]

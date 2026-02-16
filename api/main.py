@@ -1346,18 +1346,20 @@ class EnsureAllRequest(BaseModel):
 @app.post("/api/weather/ensure-all")
 async def api_ensure_all_weather(req: EnsureAllRequest):
     """
-    Ensure all 6 weather sources are present in PostgreSQL.
+    Ensure all 5 weather sources are present in PostgreSQL.
 
     Checks DB for each source; fetches from external API only for missing ones.
-    If force=true, re-ingests ALL sources regardless of freshness.
-    Returns status per source and total elapsed time.
+    GFS sources (wind, visibility) are fetched synchronously (fast, 0.5° global).
+    CMEMS sources (waves, currents, ice) are fetched in a background task
+    (slower, 0.083° viewport-scoped multi-timestep forecasts).
+    Frontend should poll /api/weather/health until all sources are healthy.
     """
-    import time as _time
-
     if db_weather is None or weather_ingestion is None:
         raise HTTPException(status_code=503, detail="Database weather provider not configured")
 
+    import time as _time
     t0 = _time.monotonic()
+
     sources = {
         "gfs_wind": "gfs",
         "cmems_wave": "cmems_wave",
@@ -1367,28 +1369,62 @@ async def api_ensure_all_weather(req: EnsureAllRequest):
         "gfs_visibility": "gfs_visibility",
     }
     result = {}
+    cmems_to_fetch = []
 
     for label, source in sources.items():
         if not req.force and db_weather.has_data_for_source(source):
             result[label] = "ready"
-        else:
+        elif source in ("gfs", "gfs_visibility"):
+            # GFS: fast global 0.5° grids — run synchronously
             try:
                 if source == "gfs":
                     weather_ingestion.ingest_wind(force=req.force)
-                elif source == "cmems_wave":
-                    weather_ingestion.ingest_waves(force=req.force)
-                elif source == "cmems_current":
-                    weather_ingestion.ingest_currents(force=req.force)
-                elif source == "cmems_ice":
-                    weather_ingestion.ingest_ice(force=req.force)
-                elif source == "cmems_sst":
-                    weather_ingestion.ingest_sst(force=req.force)
-                elif source == "gfs_visibility":
+                else:
                     weather_ingestion.ingest_visibility(force=req.force)
                 result[label] = "fetched"
             except Exception as e:
                 logger.error(f"ensure-all: {label} ingestion failed: {e}")
                 result[label] = "error"
+        else:
+            # CMEMS: viewport-scoped multi-timestep — queue for background
+            cmems_to_fetch.append((label, source))
+            result[label] = "fetching"
+
+    # Launch CMEMS multi-timestep ingestion in background
+    if cmems_to_fetch:
+        async def _bg_cmems():
+            global _ingestion_running
+            _ingestion_running = True
+            try:
+                for label, source in cmems_to_fetch:
+                    try:
+                        if source == "cmems_wave":
+                            await asyncio.to_thread(
+                                weather_ingestion.ingest_waves, req.force,
+                                req.lat_min, req.lat_max, req.lon_min, req.lon_max,
+                            )
+                        elif source == "cmems_current":
+                            await asyncio.to_thread(
+                                weather_ingestion.ingest_currents, req.force,
+                                req.lat_min, req.lat_max, req.lon_min, req.lon_max,
+                            )
+                        elif source == "cmems_ice":
+                            await asyncio.to_thread(
+                                weather_ingestion.ingest_ice, req.force,
+                                req.lat_min, req.lat_max, req.lon_min, req.lon_max,
+                            )
+                        logger.info(f"ensure-all background: {label} complete")
+                    except Exception as e:
+                        logger.error(f"ensure-all background: {label} failed: {e}")
+                weather_ingestion._supersede_old_runs()
+                weather_ingestion.cleanup_orphaned_grid_data()
+                logger.info("ensure-all background CMEMS ingestion complete")
+            finally:
+                _ingestion_running = False
+
+        task = asyncio.create_task(_bg_cmems())
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
 
     elapsed_ms = int((_time.monotonic() - t0) * 1000)
     logger.info(f"ensure-all completed in {elapsed_ms}ms: {result}")
@@ -5416,6 +5452,9 @@ async def check_path_zones(
 
 _ingestion_running = False
 
+# Set of background asyncio tasks — prevents garbage collection
+_background_tasks: set = set()
+
 # Redis distributed lock keys
 _REDIS_INGESTION_LOCK = "windmar:ingestion_lock"
 _REDIS_INGESTION_STATUS = "windmar:ingestion_running"
@@ -5450,9 +5489,22 @@ async def startup_event():
     """Run migrations and start background weather ingestion."""
     _run_weather_migrations()
 
-    # Start background ingestion loop
+    # Clear stale Redis locks from previous container lifecycle
+    r = _get_redis()
+    if r is not None:
+        try:
+            for stale_key in ("windmar:resync_lock",):
+                if r.exists(stale_key):
+                    r.delete(stale_key)
+                    logger.info(f"Cleared stale Redis lock: {stale_key}")
+        except Exception:
+            pass
+
+    # Start background ingestion loop (store ref to prevent GC)
     if weather_ingestion is not None:
-        asyncio.create_task(_ingestion_loop())
+        task = asyncio.create_task(_ingestion_loop())
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
         logger.info("Weather ingestion background loop started")
 
 
@@ -5505,11 +5557,12 @@ def _auto_prefetch_all():
     Called after weather ingestion to populate the frame caches
     that the frontend timeline needs.
     """
-    # Default bounds for wind/wave/current/SST/visibility
-    # Covers US East Coast → Arabian Sea (wide enough for Atlantic + Med + Red Sea + Gulf)
-    bounds = (10.0, 72.0, -50.0, 70.0)
+    # Default bounds for wind/wave/current/visibility
+    # North Atlantic + Mediterranean (≤ 40° lat × 60° lon to avoid OOM
+    # on CMEMS 0.083° grids with 41 timesteps × 9 parameters).
+    bounds = (25.0, 60.0, -20.0, 40.0)
     # Ice needs high-latitude bounds
-    ice_bounds = (55.0, 80.0, -50.0, 70.0)
+    ice_bounds = (55.0, 75.0, -20.0, 40.0)
 
     layers = [
         ("wind", _do_wind_prefetch, bounds),
@@ -5541,23 +5594,28 @@ async def _ingestion_loop():
     import random
 
     # Stagger startup across workers (30-60s) to reduce lock contention
-    await asyncio.sleep(30 + random.uniform(0, 30))
+    stagger = 30 + random.uniform(0, 30)
+    logger.info(f"Ingestion loop staggering {stagger:.0f}s before first run")
+    await asyncio.sleep(stagger)
 
     while True:
         if weather_ingestion is None:
+            logger.warning("Ingestion loop exiting — weather_ingestion is None")
             break
 
         r = _get_redis()
         acquired = False
         try:
             if r is not None:
+                logger.info("Ingestion loop attempting Redis lock...")
                 # Try to acquire distributed lock (expires after 2h for ingestion + prefetch)
                 acquired = r.set(_REDIS_INGESTION_LOCK, "1", nx=True, ex=7200)
                 if not acquired:
-                    logger.debug("Another worker holds ingestion lock, skipping")
+                    logger.info("Another worker holds ingestion lock, sleeping 6h")
                     await asyncio.sleep(6 * 3600)
                     continue
                 r.setex(_REDIS_INGESTION_STATUS, 7200, "1")
+                logger.info("Ingestion loop acquired Redis lock")
 
             _ingestion_running = True
 
@@ -5570,23 +5628,37 @@ async def _ingestion_loop():
                 health = await asyncio.to_thread(db_weather.get_health)
                 unhealthy = [k for k, v in health.get("sources", {}).items() if not v.get("healthy")]
                 if not unhealthy:
-                    logger.info("All 6 weather sources healthy — skipping ingestion")
+                    logger.info("All weather sources healthy — skipping ingestion")
                 else:
                     logger.info(f"Unhealthy sources: {unhealthy} — ingesting selectively")
-                    ingest_map = {
-                        "gfs": weather_ingestion.ingest_wind,
-                        "cmems_wave": weather_ingestion.ingest_waves,
-                        "cmems_current": weather_ingestion.ingest_currents,
-                        "cmems_ice": weather_ingestion.ingest_ice,
-                        "gfs_visibility": weather_ingestion.ingest_visibility,
-                    }
+                    # Default CMEMS viewport bounds (same as _auto_prefetch_all)
+                    cmems_bounds = dict(
+                        lat_min=25.0, lat_max=60.0, lon_min=-20.0, lon_max=40.0
+                    )
+                    ice_bounds = dict(
+                        lat_min=55.0, lat_max=75.0, lon_min=-20.0, lon_max=40.0
+                    )
                     for src in unhealthy:
-                        fn = ingest_map.get(src)
-                        if fn:
-                            try:
-                                await asyncio.to_thread(fn, True)
-                            except Exception as e:
-                                logger.error(f"Selective ingestion {src} failed: {e}")
+                        try:
+                            if src == "gfs":
+                                await asyncio.to_thread(weather_ingestion.ingest_wind, True)
+                            elif src == "cmems_wave":
+                                await asyncio.to_thread(
+                                    weather_ingestion.ingest_waves, True, **cmems_bounds
+                                )
+                            elif src == "cmems_current":
+                                await asyncio.to_thread(
+                                    weather_ingestion.ingest_currents, True, **cmems_bounds
+                                )
+                            elif src == "cmems_ice":
+                                await asyncio.to_thread(
+                                    weather_ingestion.ingest_ice, True, **ice_bounds
+                                )
+                            elif src == "gfs_visibility":
+                                await asyncio.to_thread(weather_ingestion.ingest_visibility, True)
+                            logger.info(f"Selective ingestion {src} complete")
+                        except Exception as e:
+                            logger.error(f"Selective ingestion {src} failed: {e}")
                     weather_ingestion._supersede_old_runs()
                     weather_ingestion.cleanup_orphaned_grid_data()
                     logger.info("Selective weather ingestion complete")
@@ -5646,7 +5718,9 @@ async def trigger_weather_ingestion():
                 except Exception:
                     pass
 
-    asyncio.create_task(_run())
+    task = asyncio.create_task(_run())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
     return {"status": "started", "message": "Weather ingestion triggered in background"}
 
 

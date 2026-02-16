@@ -36,22 +36,52 @@ class WeatherIngestionService:
     def _get_conn(self):
         return psycopg2.connect(self.db_url)
 
-    def ingest_all(self, force: bool = False):
+    # Default CMEMS viewport bounds (North Atlantic + Mediterranean).
+    # Global 0.083° CMEMS grids are too large; GFS 0.5° is fine globally.
+    # Keep the bounding box ≤ 40° lat × 60° lon to avoid OOM during
+    # xarray load (~1.5 GB for 9 params × 41 timesteps at this extent).
+    CMEMS_DEFAULT_LAT_MIN = 25.0
+    CMEMS_DEFAULT_LAT_MAX = 60.0
+    CMEMS_DEFAULT_LON_MIN = -20.0
+    CMEMS_DEFAULT_LON_MAX = 40.0
+    # Ice needs high-latitude bounds (but narrower longitude span)
+    ICE_DEFAULT_LAT_MIN = 55.0
+    ICE_DEFAULT_LAT_MAX = 75.0
+    ICE_DEFAULT_LON_MIN = -20.0
+    ICE_DEFAULT_LON_MAX = 40.0
+
+    def ingest_all(self, force: bool = False,
+                   lat_min: Optional[float] = None, lat_max: Optional[float] = None,
+                   lon_min: Optional[float] = None, lon_max: Optional[float] = None):
         """Run full ingestion cycle: wind + waves + currents + ice + visibility.
 
-        Downloads GFS wind (41 forecast hours, ~2-3 min with rate limiting),
-        CMEMS waves, CMEMS currents, CMEMS ice, and GFS visibility
-        into PostgreSQL for sub-second route optimization queries.
-        SST disabled — global 0.083 deg download too large for current pipeline.
+        Downloads GFS wind and visibility globally (0.5° resolution).
+        Downloads CMEMS waves, currents, and ice for the given viewport bounds
+        (0.083° resolution — global would be too large).
+        SST disabled — global 0.083° download too large for current pipeline.
 
         Args:
             force: If True, bypass freshness checks and re-ingest all sources.
+            lat_min/lat_max/lon_min/lon_max: Viewport bounds for CMEMS sources.
+                Defaults to CMEMS_DEFAULT_* class attributes.
         """
+        _lat_min = lat_min if lat_min is not None else self.CMEMS_DEFAULT_LAT_MIN
+        _lat_max = lat_max if lat_max is not None else self.CMEMS_DEFAULT_LAT_MAX
+        _lon_min = lon_min if lon_min is not None else self.CMEMS_DEFAULT_LON_MIN
+        _lon_max = lon_max if lon_max is not None else self.CMEMS_DEFAULT_LON_MAX
+        _ice_lat_min = lat_min if lat_min is not None else self.ICE_DEFAULT_LAT_MIN
+        _ice_lat_max = lat_max if lat_max is not None else self.ICE_DEFAULT_LAT_MAX
+        _ice_lon_min = lon_min if lon_min is not None else self.ICE_DEFAULT_LON_MIN
+        _ice_lon_max = lon_max if lon_max is not None else self.ICE_DEFAULT_LON_MAX
+
         logger.info(f"Starting weather ingestion cycle (force={force})")
         self.ingest_wind(force=force)
-        self.ingest_waves(force=force)
-        self.ingest_currents(force=force)
-        self.ingest_ice(force=force)
+        self.ingest_waves(force=force, lat_min=_lat_min, lat_max=_lat_max,
+                          lon_min=_lon_min, lon_max=_lon_max)
+        self.ingest_currents(force=force, lat_min=_lat_min, lat_max=_lat_max,
+                             lon_min=_lon_min, lon_max=_lon_max)
+        self.ingest_ice(force=force, lat_min=_ice_lat_min, lat_max=_ice_lat_max,
+                        lon_min=_ice_lon_min, lon_max=_ice_lon_max)
         # SST disabled — copernicusmarine.subset() downloads 4+ GB for global grid
         self.ingest_visibility(force=force)
         self._supersede_old_runs()
@@ -183,252 +213,107 @@ class WeatherIngestionService:
         finally:
             conn.close()
 
-    def ingest_waves(self, force: bool = False):
-        """Fetch CMEMS wave snapshot (Hs, Tp, Dir) including swell decomposition.
+    def ingest_waves(self, force: bool = False,
+                     lat_min: Optional[float] = None, lat_max: Optional[float] = None,
+                     lon_min: Optional[float] = None, lon_max: Optional[float] = None):
+        """Fetch CMEMS wave forecast (0-120h, 3-hourly) and store all frames.
 
-        Skips if a multi-timestep forecast run already exists in the DB
-        (to avoid replacing it with a single snapshot).
+        Downloads the full multi-timestep wave forecast including swell
+        decomposition.  Skips if a recent multi-timestep run already exists.
+
+        Args:
+            force: Bypass freshness guard.
+            lat_min/lat_max/lon_min/lon_max: Viewport bounds (defaults to class globals).
         """
         source = "cmems_wave"
         if not force and self._has_multistep_run(source):
-            logger.debug("Skipping wave snapshot — multi-timestep run exists in DB")
+            logger.debug("Skipping wave ingestion — multi-timestep run exists in DB")
             return
 
-        run_time = datetime.now(timezone.utc)
+        _lat_min = lat_min if lat_min is not None else self.LAT_MIN
+        _lat_max = lat_max if lat_max is not None else self.LAT_MAX
+        _lon_min = lon_min if lon_min is not None else self.LON_MIN
+        _lon_max = lon_max if lon_max is not None else self.LON_MAX
 
-        conn = self._get_conn()
+        logger.info("CMEMS wave forecast ingestion starting")
         try:
-            cur = conn.cursor()
-
-            cur.execute(
-                """INSERT INTO weather_forecast_runs
-                   (source, run_time, status, grid_resolution,
-                    lat_min, lat_max, lon_min, lon_max, forecast_hours)
-                   VALUES (%s, %s, 'ingesting', %s, %s, %s, %s, %s, %s)
-                   ON CONFLICT (source, run_time) DO UPDATE
-                   SET status = 'ingesting', ingested_at = NOW()
-                   RETURNING id""",
-                (source, run_time, self.GRID_RESOLUTION,
-                 self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
-                 [0]),
+            result = self.copernicus_provider.fetch_wave_forecast(
+                _lat_min, _lat_max, _lon_min, _lon_max,
             )
-            run_id = cur.fetchone()[0]
-            conn.commit()
-
-            wave_data = self.copernicus_provider.fetch_wave_data(
-                self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
-            )
-            if wave_data is None:
-                cur.execute(
-                    "UPDATE weather_forecast_runs SET status = 'failed' WHERE id = %s",
-                    (run_id,),
-                )
-                conn.commit()
-                logger.warning("CMEMS wave fetch returned None")
+            if not result:
+                logger.warning("CMEMS wave forecast fetch returned empty")
                 return
-
-            lats_blob = self._compress(np.asarray(wave_data.lats))
-            lons_blob = self._compress(np.asarray(wave_data.lons))
-            rows = len(wave_data.lats)
-            cols = len(wave_data.lons)
-
-            for param, arr in [
-                ("wave_hs", wave_data.values),
-                ("wave_tp", wave_data.wave_period),
-                ("wave_dir", wave_data.wave_direction),
-                ("swell_hs", wave_data.swell_height),
-                ("swell_tp", wave_data.swell_period),
-                ("swell_dir", wave_data.swell_direction),
-                ("windwave_hs", wave_data.windwave_height),
-                ("windwave_tp", wave_data.windwave_period),
-                ("windwave_dir", wave_data.windwave_direction),
-            ]:
-                if arr is None:
-                    continue
-                cur.execute(
-                    """INSERT INTO weather_grid_data
-                       (run_id, forecast_hour, parameter, lats, lons, data, shape_rows, shape_cols)
-                       VALUES (%s, 0, %s, %s, %s, %s, %s, %s)
-                       ON CONFLICT (run_id, forecast_hour, parameter)
-                       DO UPDATE SET data = EXCLUDED.data,
-                                    lats = EXCLUDED.lats,
-                                    lons = EXCLUDED.lons,
-                                    shape_rows = EXCLUDED.shape_rows,
-                                    shape_cols = EXCLUDED.shape_cols""",
-                    (run_id, param, lats_blob, lons_blob,
-                     self._compress(np.asarray(arr)), rows, cols),
-                )
-
-            cur.execute(
-                "UPDATE weather_forecast_runs SET status = 'complete' WHERE id = %s",
-                (run_id,),
-            )
-            conn.commit()
-            logger.info("CMEMS wave snapshot ingestion complete")
-
+            self.ingest_wave_forecast_frames(result)
         except Exception as e:
-            logger.error(f"Wave ingestion failed: {e}")
-            conn.rollback()
-        finally:
-            conn.close()
+            logger.error(f"Wave forecast ingestion failed: {e}")
 
-    def ingest_currents(self, force: bool = False):
-        """Fetch CMEMS current data (single snapshot).
+    def ingest_currents(self, force: bool = False,
+                        lat_min: Optional[float] = None, lat_max: Optional[float] = None,
+                        lon_min: Optional[float] = None, lon_max: Optional[float] = None):
+        """Fetch CMEMS current forecast (0-120h, 3-hourly) and store all frames.
 
-        Skips if a multi-timestep forecast run already exists in the DB.
+        Downloads the full multi-timestep current forecast (u/v components).
+        Skips if a recent multi-timestep run already exists.
+
+        Args:
+            force: Bypass freshness guard.
+            lat_min/lat_max/lon_min/lon_max: Viewport bounds (defaults to class globals).
         """
         source = "cmems_current"
         if not force and self._has_multistep_run(source):
-            logger.debug("Skipping current snapshot — multi-timestep run exists in DB")
+            logger.debug("Skipping current ingestion — multi-timestep run exists in DB")
             return
 
-        run_time = datetime.now(timezone.utc)
+        _lat_min = lat_min if lat_min is not None else self.LAT_MIN
+        _lat_max = lat_max if lat_max is not None else self.LAT_MAX
+        _lon_min = lon_min if lon_min is not None else self.LON_MIN
+        _lon_max = lon_max if lon_max is not None else self.LON_MAX
 
-        conn = self._get_conn()
+        logger.info("CMEMS current forecast ingestion starting")
         try:
-            cur = conn.cursor()
-
-            cur.execute(
-                """INSERT INTO weather_forecast_runs
-                   (source, run_time, status, grid_resolution,
-                    lat_min, lat_max, lon_min, lon_max, forecast_hours)
-                   VALUES (%s, %s, 'ingesting', %s, %s, %s, %s, %s, %s)
-                   ON CONFLICT (source, run_time) DO UPDATE
-                   SET status = 'ingesting', ingested_at = NOW()
-                   RETURNING id""",
-                (source, run_time, self.GRID_RESOLUTION,
-                 self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
-                 [0]),
+            result = self.copernicus_provider.fetch_current_forecast(
+                _lat_min, _lat_max, _lon_min, _lon_max,
             )
-            run_id = cur.fetchone()[0]
-            conn.commit()
-
-            current_data = self.copernicus_provider.fetch_current_data(
-                self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
-            )
-            if current_data is None:
-                cur.execute(
-                    "UPDATE weather_forecast_runs SET status = 'failed' WHERE id = %s",
-                    (run_id,),
-                )
-                conn.commit()
-                logger.warning("CMEMS current fetch returned None")
+            if not result:
+                logger.warning("CMEMS current forecast fetch returned empty")
                 return
-
-            lats_blob = self._compress(np.asarray(current_data.lats))
-            lons_blob = self._compress(np.asarray(current_data.lons))
-            rows = len(current_data.lats)
-            cols = len(current_data.lons)
-
-            for param, arr in [
-                ("current_u", current_data.u_component),
-                ("current_v", current_data.v_component),
-            ]:
-                if arr is None:
-                    continue
-                cur.execute(
-                    """INSERT INTO weather_grid_data
-                       (run_id, forecast_hour, parameter, lats, lons, data, shape_rows, shape_cols)
-                       VALUES (%s, 0, %s, %s, %s, %s, %s, %s)
-                       ON CONFLICT (run_id, forecast_hour, parameter)
-                       DO UPDATE SET data = EXCLUDED.data,
-                                    lats = EXCLUDED.lats,
-                                    lons = EXCLUDED.lons,
-                                    shape_rows = EXCLUDED.shape_rows,
-                                    shape_cols = EXCLUDED.shape_cols""",
-                    (run_id, param, lats_blob, lons_blob,
-                     self._compress(np.asarray(arr)), rows, cols),
-                )
-
-            cur.execute(
-                "UPDATE weather_forecast_runs SET status = 'complete' WHERE id = %s",
-                (run_id,),
-            )
-            conn.commit()
-            logger.info("CMEMS current snapshot ingestion complete")
-
+            self.ingest_current_forecast_frames(result)
         except Exception as e:
-            logger.error(f"Current ingestion failed: {e}")
-            conn.rollback()
-        finally:
-            conn.close()
+            logger.error(f"Current forecast ingestion failed: {e}")
 
-    def ingest_ice(self, force: bool = False):
-        """Fetch CMEMS ice concentration snapshot.
+    def ingest_ice(self, force: bool = False,
+                   lat_min: Optional[float] = None, lat_max: Optional[float] = None,
+                   lon_min: Optional[float] = None, lon_max: Optional[float] = None):
+        """Fetch CMEMS ice forecast (10-day daily) and store all frames.
 
-        Skips if a complete ice run already exists in the DB (any timestep count).
+        Downloads multi-timestep ice concentration forecast (0, 24, 48, ..., 216h).
+        Skips if a recent multi-timestep run already exists.
+
+        Args:
+            force: Bypass freshness guard.
+            lat_min/lat_max/lon_min/lon_max: Viewport bounds (defaults to class globals).
         """
         source = "cmems_ice"
         if not force and self._has_multistep_run(source):
-            logger.debug("Skipping ice snapshot — run exists in DB")
+            logger.debug("Skipping ice ingestion — multi-timestep run exists in DB")
             return
 
-        run_time = datetime.now(timezone.utc)
+        _lat_min = lat_min if lat_min is not None else self.LAT_MIN
+        _lat_max = lat_max if lat_max is not None else self.LAT_MAX
+        _lon_min = lon_min if lon_min is not None else self.LON_MIN
+        _lon_max = lon_max if lon_max is not None else self.LON_MAX
 
-        conn = self._get_conn()
+        logger.info("CMEMS ice forecast ingestion starting")
         try:
-            cur = conn.cursor()
-
-            cur.execute(
-                """INSERT INTO weather_forecast_runs
-                   (source, run_time, status, grid_resolution,
-                    lat_min, lat_max, lon_min, lon_max, forecast_hours)
-                   VALUES (%s, %s, 'ingesting', %s, %s, %s, %s, %s, %s)
-                   ON CONFLICT (source, run_time) DO UPDATE
-                   SET status = 'ingesting', ingested_at = NOW()
-                   RETURNING id""",
-                (source, run_time, self.GRID_RESOLUTION,
-                 self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
-                 [0]),
+            result = self.copernicus_provider.fetch_ice_forecast(
+                _lat_min, _lat_max, _lon_min, _lon_max,
             )
-            run_id = cur.fetchone()[0]
-            conn.commit()
-
-            ice_data = self.copernicus_provider.fetch_ice_data(
-                self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
-            )
-            if ice_data is None:
-                cur.execute(
-                    "UPDATE weather_forecast_runs SET status = 'failed' WHERE id = %s",
-                    (run_id,),
-                )
-                conn.commit()
-                logger.warning("CMEMS ice fetch returned None")
+            if not result:
+                logger.warning("CMEMS ice forecast fetch returned empty")
                 return
-
-            lats_blob = self._compress(np.asarray(ice_data.lats))
-            lons_blob = self._compress(np.asarray(ice_data.lons))
-            rows = len(ice_data.lats)
-            cols = len(ice_data.lons)
-
-            arr = ice_data.ice_concentration if ice_data.ice_concentration is not None else ice_data.values
-            if arr is not None:
-                cur.execute(
-                    """INSERT INTO weather_grid_data
-                       (run_id, forecast_hour, parameter, lats, lons, data, shape_rows, shape_cols)
-                       VALUES (%s, 0, %s, %s, %s, %s, %s, %s)
-                       ON CONFLICT (run_id, forecast_hour, parameter)
-                       DO UPDATE SET data = EXCLUDED.data,
-                                    lats = EXCLUDED.lats,
-                                    lons = EXCLUDED.lons,
-                                    shape_rows = EXCLUDED.shape_rows,
-                                    shape_cols = EXCLUDED.shape_cols""",
-                    (run_id, "ice_siconc", lats_blob, lons_blob,
-                     self._compress(np.asarray(arr)), rows, cols),
-                )
-
-            cur.execute(
-                "UPDATE weather_forecast_runs SET status = 'complete' WHERE id = %s",
-                (run_id,),
-            )
-            conn.commit()
-            logger.info("CMEMS ice snapshot ingestion complete")
-
+            self.ingest_ice_forecast_frames(result)
         except Exception as e:
-            logger.error(f"Ice ingestion failed: {e}")
-            conn.rollback()
-        finally:
-            conn.close()
+            logger.error(f"Ice forecast ingestion failed: {e}")
 
     def ingest_wave_forecast_frames(self, frames: dict):
         """Store multi-timestep wave forecast frames into PostgreSQL.
