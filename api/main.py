@@ -1777,6 +1777,26 @@ _prefetch_running = False
 _prefetch_lock = None  # Will be a threading.Lock
 _last_wind_prefetch_run = None  # (run_date, run_hour) tuple from last successful prefetch
 
+def _is_cache_complete(cache_file: Path) -> bool:
+    """Check if a forecast cache file has all expected frames.
+
+    Reads only the first 512 bytes to extract cached_hours / total_hours
+    without parsing the entire multi-MB JSON payload.  Returns True if
+    the file looks complete (or if the check is inconclusive).
+    """
+    import re as _re
+    try:
+        with open(cache_file, "rb") as fh:
+            header = fh.read(512)
+        m_cached = _re.search(rb'"cached_hours"\s*:\s*(\d+)', header)
+        m_total = _re.search(rb'"total_hours"\s*:\s*(\d+)', header)
+        if m_cached and m_total:
+            return int(m_cached.group(1)) >= int(m_total.group(1))
+    except Exception:
+        pass
+    return True  # inconclusive → serve it
+
+
 # File-based cache for wind forecast frames (shared across gunicorn workers)
 _WIND_CACHE_DIR = Path("/tmp/windmar_cache/wind")
 _WIND_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -2004,7 +2024,10 @@ async def api_get_forecast_frames(
     cache_key = _wind_cache_key(lat_min, lat_max, lon_min, lon_max)
     cache_file = _WIND_CACHE_DIR / f"{cache_key}.json"
     if cache_file.exists():
-        return Response(content=cache_file.read_bytes(), media_type="application/json")
+        if _is_cache_complete(cache_file):
+            return Response(content=cache_file.read_bytes(), media_type="application/json")
+        logger.warning("Wind cache %s is partial — deleting", cache_key)
+        cache_file.unlink(missing_ok=True)
 
     # No file cache — return empty (prefetch hasn't run or hasn't finished yet)
     run_date, run_hour = gfs_provider._get_latest_run()
@@ -2448,7 +2471,10 @@ async def api_get_wave_forecast_frames(
     cache_key = f"wave_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
     cache_file = _wave_cache_path(cache_key)
     if cache_file.exists():
-        return RawResponse(content=cache_file.read_bytes(), media_type="application/json")
+        if _is_cache_complete(cache_file):
+            return RawResponse(content=cache_file.read_bytes(), media_type="application/json")
+        logger.warning("Wave cache %s is partial — rebuilding from DB", cache_key)
+        cache_file.unlink(missing_ok=True)
 
     # Fallback: rebuild from PostgreSQL
     cached = await asyncio.to_thread(
@@ -2696,7 +2722,10 @@ async def api_get_current_forecast_frames(
     cache_key = f"current_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
     cache_file = _current_cache_path(cache_key)
     if cache_file.exists():
-        return RawResponse(content=cache_file.read_bytes(), media_type="application/json")
+        if _is_cache_complete(cache_file):
+            return RawResponse(content=cache_file.read_bytes(), media_type="application/json")
+        logger.warning("Current cache %s is partial — rebuilding from DB", cache_key)
+        cache_file.unlink(missing_ok=True)
 
     # Fallback: rebuild from PostgreSQL
     cached = await asyncio.to_thread(
@@ -3015,7 +3044,10 @@ async def api_get_ice_forecast_frames(
     cache_key = f"ice_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
     cache_file = _ice_cache_path(cache_key)
     if cache_file.exists():
-        return RawResponse(content=cache_file.read_bytes(), media_type="application/json")
+        if _is_cache_complete(cache_file):
+            return RawResponse(content=cache_file.read_bytes(), media_type="application/json")
+        logger.warning("Ice cache %s is partial — rebuilding from DB", cache_key)
+        cache_file.unlink(missing_ok=True)
 
     # Fallback: rebuild from PostgreSQL
     cached = await asyncio.to_thread(
@@ -3274,7 +3306,10 @@ async def api_get_sst_forecast_frames(
     if not cache_file.exists():
         cache_file = _find_covering_cache(_SST_CACHE_DIR, "sst", lat_min, lat_max, lon_min, lon_max)
     if cache_file and cache_file.exists():
-        return RawResponse(content=cache_file.read_bytes(), media_type="application/json")
+        if _is_cache_complete(cache_file):
+            return RawResponse(content=cache_file.read_bytes(), media_type="application/json")
+        logger.warning("SST cache %s is partial — deleting", cache_file.name)
+        cache_file.unlink(missing_ok=True)
 
     return {
         "run_time": "",
@@ -3341,6 +3376,57 @@ def _vis_cache_put(cache_key: str, data: dict):
     tmp = p.with_suffix(".tmp")
     tmp.write_text(_json.dumps(data))
     tmp.rename(p)
+
+
+def _rebuild_vis_cache_from_db(cache_key, lat_min, lat_max, lon_min, lon_max):
+    """Rebuild visibility forecast file cache from PostgreSQL data."""
+    if db_weather is None:
+        return None
+
+    run_time, hours = db_weather.get_available_hours_by_source("gfs_visibility")
+    if not hours:
+        return None
+
+    logger.info(f"Rebuilding visibility cache from DB: {len(hours)} hours")
+
+    grids = db_weather.get_grids_for_timeline(
+        "gfs_visibility", ["visibility"],
+        lat_min, lat_max, lon_min, lon_max, hours
+    )
+
+    if not grids or "visibility" not in grids or not grids["visibility"]:
+        return None
+
+    first_fh = min(grids["visibility"].keys())
+    lats_full, lons_full, _ = grids["visibility"][first_fh]
+    max_dim = max(len(lats_full), len(lons_full))
+    STEP = max(1, round(max_dim / 250))
+    shared_lats = lats_full[::STEP].tolist()
+    shared_lons = lons_full[::STEP].tolist()
+
+    frames = {}
+    for fh in sorted(hours):
+        if fh in grids["visibility"]:
+            _, _, d = grids["visibility"][fh]
+            frames[str(fh)] = {
+                "data": np.round(d[::STEP, ::STEP], 1).tolist(),
+            }
+
+    cache_data = {
+        "run_time": run_time.isoformat() if run_time else "",
+        "total_hours": len(frames),
+        "cached_hours": len(frames),
+        "source": "gfs",
+        "lats": shared_lats,
+        "lons": shared_lons,
+        "ny": len(shared_lats),
+        "nx": len(shared_lons),
+        "frames": frames,
+    }
+
+    _vis_cache_put(cache_key, cache_data)
+    logger.info(f"Visibility cache rebuilt from DB: {len(frames)} frames")
+    return cache_data
 
 
 @app.get("/api/weather/forecast/visibility/status")
@@ -3507,7 +3593,18 @@ async def api_get_vis_forecast_frames(
     if not cache_file.exists():
         cache_file = _find_covering_cache(_VIS_CACHE_DIR, "vis", lat_min, lat_max, lon_min, lon_max)
     if cache_file and cache_file.exists():
-        return RawResponse(content=cache_file.read_bytes(), media_type="application/json")
+        if _is_cache_complete(cache_file):
+            return RawResponse(content=cache_file.read_bytes(), media_type="application/json")
+        logger.warning("Visibility cache %s is partial — deleting", cache_file.name)
+        cache_file.unlink(missing_ok=True)
+
+    # Fallback: rebuild from PostgreSQL
+    cached = await asyncio.to_thread(
+        _rebuild_vis_cache_from_db, cache_key, lat_min, lat_max, lon_min, lon_max
+    )
+
+    if cached:
+        return cached
 
     return {
         "run_time": "",
