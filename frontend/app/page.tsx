@@ -43,7 +43,6 @@ export default function HomePage() {
   // Viewport sync status
   const [syncStatus, setSyncStatus] = useState<WeatherSyncStatus | null>(null);
   const [resyncRunning, setResyncRunning] = useState(false);
-  const syncCheckTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Weather visualization
   const [weatherLayer, setWeatherLayer] = useState<WeatherLayer>('none');
@@ -266,20 +265,23 @@ export default function HomePage() {
     }
   }, []);
 
-  // On viewport change: debounced sync-status check (no auto-fetch)
+  // Sync-status check: runs once when weather is ready (health-based,
+  // independent of viewport bounds — panning does not change sync state).
   useEffect(() => {
-    if (!weatherReady || !viewport) return;
-    if (syncCheckTimerRef.current) clearTimeout(syncCheckTimerRef.current);
-    syncCheckTimerRef.current = setTimeout(async () => {
+    if (!weatherReady) return;
+    let cancelled = false;
+    (async () => {
       try {
-        const status = await apiClient.getWeatherSyncStatus(viewport.bounds);
-        setSyncStatus(status);
+        const status = await apiClient.getWeatherSyncStatus(
+          viewport?.bounds ?? { lat_min: -85, lat_max: 85, lon_min: -180, lon_max: 180 }
+        );
+        if (!cancelled) setSyncStatus(status);
       } catch {
         // Silently ignore — badge just won't show
       }
-    }, 600);
-    return () => { if (syncCheckTimerRef.current) clearTimeout(syncCheckTimerRef.current); };
-  }, [viewport, weatherReady]); // eslint-disable-line react-hooks/exhaustive-deps
+    })();
+    return () => { cancelled = true; };
+  }, [weatherReady]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Reload weather when layer changes (both modes — user explicitly toggled a layer)
   useEffect(() => {
@@ -943,11 +945,11 @@ export default function HomePage() {
                   };
                   await poll();
 
-                  // Refresh sync status
-                  if (vp) {
-                    const newSync = await apiClient.getWeatherSyncStatus(vp.bounds).catch(() => null);
-                    if (newSync) setSyncStatus(newSync);
-                  }
+                  // Refresh sync status (health-based, viewport-independent)
+                  const newSync = await apiClient.getWeatherSyncStatus(
+                    vp?.bounds ?? { lat_min: -85, lat_max: 85, lon_min: -180, lon_max: 180 }
+                  ).catch(() => null);
+                  if (newSync) setSyncStatus(newSync);
                 } catch (error) {
                   debugLog('error', 'WEATHER', `Resync failed: ${error}`);
                 } finally {

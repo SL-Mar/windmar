@@ -1457,33 +1457,37 @@ async def api_weather_sync_status(
     lon_min: float = Query(-179.75),
     lon_max: float = Query(179.75),
 ):
-    """Compare viewport bounds against DB bounds.
+    """Check whether weather data is current and complete.
 
-    Returns whether the DB data covers the visible map area.
+    Uses source health (present + complete + fresh) rather than geographic
+    bounds comparison, which was unreliable because different sources cover
+    different regions (GFS global vs CMEMS regional) and viewport panning
+    caused the sync badge to flicker.
     """
     if db_weather is None:
         raise HTTPException(status_code=503, detail="Database weather provider not configured")
 
-    db_bounds = await asyncio.to_thread(db_weather.get_db_bounds)
-    if db_bounds is None:
-        return {"in_sync": False, "coverage": "none", "db_bounds": None}
+    health = await asyncio.to_thread(db_weather.get_health)
+    sources = health.get("sources", {})
 
-    # Check if viewport is fully contained within DB bounds
-    covers_lat = db_bounds["lat_min"] <= lat_min and db_bounds["lat_max"] >= lat_max
-    covers_lon = db_bounds["lon_min"] <= lon_min and db_bounds["lon_max"] >= lon_max
+    # Count healthy vs expected sources (exclude SST — disabled in pipeline)
+    active_sources = {k: v for k, v in sources.items() if k != "cmems_sst"}
+    healthy_count = sum(1 for v in active_sources.values() if v.get("healthy"))
+    total_count = len(active_sources)
 
-    if covers_lat and covers_lon:
-        coverage = "full"
-    elif (db_bounds["lat_max"] < lat_min or db_bounds["lat_min"] > lat_max or
-          db_bounds["lon_max"] < lon_min or db_bounds["lon_min"] > lon_max):
+    if total_count == 0:
         coverage = "none"
-    else:
+    elif healthy_count == total_count:
+        coverage = "full"
+    elif healthy_count > 0:
         coverage = "partial"
+    else:
+        coverage = "none"
 
     return {
         "in_sync": coverage == "full",
         "coverage": coverage,
-        "db_bounds": db_bounds,
+        "db_bounds": health.get("db_bounds"),
     }
 
 
