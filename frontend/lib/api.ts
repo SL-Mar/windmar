@@ -794,6 +794,77 @@ export interface FuelScenario {
   power_kw: number;
 }
 
+// Performance prediction types
+export interface PerformancePredictionRequest {
+  is_laden: boolean;
+  engine_load_pct: number;
+  heading_deg: number;
+  wind_speed_kts: number;
+  wind_dir_deg: number;
+  wave_height_m: number;
+  wave_dir_deg: number;
+  current_speed_kts: number;
+  current_dir_deg: number;
+}
+
+export interface PerformancePredictionResult {
+  stw_kts: number;
+  sog_kts: number;
+  fuel_per_day_mt: number;
+  fuel_per_nm_mt: number;
+  power_kw: number;
+  load_pct: number;
+  sfoc_gkwh: number;
+  resistance_breakdown_kn: {
+    calm_water: number;
+    wind: number;
+    waves: number;
+    total: number;
+  };
+  speed_loss_from_weather_pct: number;
+  calm_water_speed_kts: number;
+  current_effect_kts: number;
+  service_speed_kts: number;
+}
+
+// Vessel model status types
+export interface VesselModelStatus {
+  specifications: {
+    dimensions: {
+      loa: number; lpp: number; beam: number;
+      draft_laden: number; draft_ballast: number;
+      dwt: number; displacement_laden: number; displacement_ballast: number;
+    };
+    hull_form: {
+      cb_laden: number; cb_ballast: number;
+      wetted_surface_laden: number; wetted_surface_ballast: number;
+    };
+    engine: {
+      mcr_kw: number; sfoc_at_mcr: number;
+      service_speed_laden: number; service_speed_ballast: number;
+    };
+    areas: {
+      frontal_area_laden: number; frontal_area_ballast: number;
+      lateral_area_laden: number; lateral_area_ballast: number;
+    };
+  };
+  calibration: {
+    calibrated: boolean;
+    factors: { calm_water: number; wind: number; waves: number; sfoc_factor: number };
+    calibrated_at: string | null;
+    num_reports_used: number;
+    calibration_error_mt: number;
+    days_since_drydock: number;
+  };
+  wave_method: string;
+  computed: {
+    optimal_speed_laden_kts: number;
+    optimal_speed_ballast_kts: number;
+    daily_fuel_service_laden_mt: number;
+    daily_fuel_service_ballast_mt: number;
+  };
+}
+
 // Engine Log types
 export interface EngineLogUploadResponse {
   status: string;
@@ -1499,35 +1570,18 @@ export const apiClient = {
   // -------------------------------------------------------------------------
 
   async getFuelScenarios(): Promise<{ scenarios: FuelScenario[] }> {
-    // Fuel scenarios are computed from vessel model at different conditions
-    const specs = await this.getVesselSpecs();
-    const scenarios: FuelScenario[] = [
-      {
-        name: 'Calm Water (Laden)',
-        conditions: `${specs.service_speed_laden} kts, no wind/waves`,
-        fuel_mt: specs.sfoc_at_mcr * specs.mcr_kw * 0.75 * 24 / 1e6,
-        power_kw: specs.mcr_kw * 0.75,
-      },
-      {
-        name: 'Head Wind (Laden)',
-        conditions: `${specs.service_speed_laden} kts, 20 kt head wind`,
-        fuel_mt: specs.sfoc_at_mcr * specs.mcr_kw * 0.85 * 24 / 1e6,
-        power_kw: specs.mcr_kw * 0.85,
-      },
-      {
-        name: 'Rough Seas (Laden)',
-        conditions: `${specs.service_speed_laden} kts, 3m waves`,
-        fuel_mt: specs.sfoc_at_mcr * specs.mcr_kw * 0.90 * 24 / 1e6,
-        power_kw: specs.mcr_kw * 0.90,
-      },
-      {
-        name: 'Calm Water (Ballast)',
-        conditions: `${specs.service_speed_ballast} kts, no wind/waves`,
-        fuel_mt: specs.sfoc_at_mcr * specs.mcr_kw * 0.55 * 24 / 1e6,
-        power_kw: specs.mcr_kw * 0.55,
-      },
-    ];
-    return { scenarios };
+    const response = await api.get<{ scenarios: FuelScenario[] }>('/api/vessel/fuel-scenarios');
+    return response.data;
+  },
+
+  async getVesselModelStatus(): Promise<VesselModelStatus> {
+    const response = await api.get<VesselModelStatus>('/api/vessel/model-status');
+    return response.data;
+  },
+
+  async predictPerformance(req: PerformancePredictionRequest): Promise<PerformancePredictionResult> {
+    const response = await api.post<PerformancePredictionResult>('/api/vessel/predict', req);
+    return response.data;
   },
 
   // -------------------------------------------------------------------------

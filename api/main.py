@@ -5273,13 +5273,14 @@ async def calibrate_vessel(
         # Store calibration
         current_calibration = result.factors
 
-        # Update vessel model with calibration
+        # Update vessel model with calibration (including sfoc_factor)
         current_vessel_model = VesselModel(
             specs=current_vessel_specs,
             calibration_factors={
                 'calm_water': current_calibration.calm_water,
                 'wind': current_calibration.wind,
                 'waves': current_calibration.waves,
+                'sfoc_factor': current_calibration.sfoc_factor,
             }
         )
         voyage_calculator = VoyageCalculator(vessel_model=current_vessel_model)
@@ -5340,6 +5341,206 @@ async def estimate_hull_fouling(
         "resistance_increase_pct": round((fouling - 1) * 100, 1),
         "note": "This is an estimate. Calibration with actual noon reports is more accurate.",
     }
+
+
+@app.get("/api/vessel/model-status", tags=["Vessel"])
+async def get_vessel_model_status():
+    """
+    Full vessel model status: all specs, calibration state, computed values.
+
+    Returns every VesselSpecs field grouped by category, current calibration
+    factors with timestamp, and derived performance values (optimal speeds,
+    daily fuel at service speed).
+    """
+    specs = current_vessel_specs
+    cal = current_calibration
+    model = current_vessel_model
+
+    # Compute optimal speeds and daily fuel at service speed
+    optimal_laden = model.get_optimal_speed(is_laden=True)
+    optimal_ballast = model.get_optimal_speed(is_laden=False)
+
+    fuel_at_service_laden = model.calculate_fuel_consumption(
+        speed_kts=specs.service_speed_laden, is_laden=True, distance_nm=specs.service_speed_laden * 24,
+    )
+    fuel_at_service_ballast = model.calculate_fuel_consumption(
+        speed_kts=specs.service_speed_ballast, is_laden=False, distance_nm=specs.service_speed_ballast * 24,
+    )
+
+    return {
+        "specifications": {
+            "dimensions": {
+                "loa": specs.loa,
+                "lpp": specs.lpp,
+                "beam": specs.beam,
+                "draft_laden": specs.draft_laden,
+                "draft_ballast": specs.draft_ballast,
+                "dwt": specs.dwt,
+                "displacement_laden": specs.displacement_laden,
+                "displacement_ballast": specs.displacement_ballast,
+            },
+            "hull_form": {
+                "cb_laden": specs.cb_laden,
+                "cb_ballast": specs.cb_ballast,
+                "wetted_surface_laden": specs.wetted_surface_laden,
+                "wetted_surface_ballast": specs.wetted_surface_ballast,
+            },
+            "engine": {
+                "mcr_kw": specs.mcr_kw,
+                "sfoc_at_mcr": specs.sfoc_at_mcr,
+                "service_speed_laden": specs.service_speed_laden,
+                "service_speed_ballast": specs.service_speed_ballast,
+            },
+            "areas": {
+                "frontal_area_laden": specs.frontal_area_laden,
+                "frontal_area_ballast": specs.frontal_area_ballast,
+                "lateral_area_laden": specs.lateral_area_laden,
+                "lateral_area_ballast": specs.lateral_area_ballast,
+            },
+        },
+        "calibration": {
+            "calibrated": cal is not None,
+            "factors": {
+                "calm_water": cal.calm_water if cal else 1.0,
+                "wind": cal.wind if cal else 1.0,
+                "waves": cal.waves if cal else 1.0,
+                "sfoc_factor": cal.sfoc_factor if cal else 1.0,
+            },
+            "calibrated_at": cal.calibrated_at.isoformat() if cal and cal.calibrated_at else None,
+            "num_reports_used": cal.num_reports_used if cal else 0,
+            "calibration_error_mt": cal.calibration_error if cal else 0.0,
+            "days_since_drydock": cal.days_since_drydock if cal else 0,
+        },
+        "wave_method": model.wave_method,
+        "computed": {
+            "optimal_speed_laden_kts": round(optimal_laden, 1),
+            "optimal_speed_ballast_kts": round(optimal_ballast, 1),
+            "daily_fuel_service_laden_mt": round(fuel_at_service_laden["fuel_mt"], 2),
+            "daily_fuel_service_ballast_mt": round(fuel_at_service_ballast["fuel_mt"], 2),
+        },
+    }
+
+
+@app.get("/api/vessel/fuel-scenarios", tags=["Vessel"])
+async def get_fuel_scenarios():
+    """
+    Compute fuel scenarios using the real physics model with current calibration.
+
+    Returns 4 daily fuel scenarios: calm laden, head wind laden,
+    rough seas laden, and calm ballast.
+    """
+    specs = current_vessel_specs
+    model = current_vessel_model
+
+    # Scenario 1: Calm water laden (24h at service speed)
+    distance_calm_laden = specs.service_speed_laden * 24
+    calm_laden = model.calculate_fuel_consumption(
+        speed_kts=specs.service_speed_laden, is_laden=True, distance_nm=distance_calm_laden,
+    )
+
+    # Scenario 2: Head wind laden (20 kt = 10.3 m/s head wind)
+    headwind_wx = {
+        "wind_speed_ms": 10.3, "wind_dir_deg": 0, "heading_deg": 0,
+        "sig_wave_height_m": 0.5, "wave_dir_deg": 0,
+    }
+    headwind_laden = model.calculate_fuel_consumption(
+        speed_kts=specs.service_speed_laden, is_laden=True,
+        weather=headwind_wx, distance_nm=distance_calm_laden,
+    )
+
+    # Scenario 3: Rough seas laden (3m waves head seas)
+    roughsea_wx = {
+        "wind_speed_ms": 8.0, "wind_dir_deg": 0, "heading_deg": 0,
+        "sig_wave_height_m": 3.0, "wave_dir_deg": 0,
+    }
+    roughsea_laden = model.calculate_fuel_consumption(
+        speed_kts=specs.service_speed_laden, is_laden=True,
+        weather=roughsea_wx, distance_nm=distance_calm_laden,
+    )
+
+    # Scenario 4: Calm water ballast
+    distance_calm_ballast = specs.service_speed_ballast * 24
+    calm_ballast = model.calculate_fuel_consumption(
+        speed_kts=specs.service_speed_ballast, is_laden=False, distance_nm=distance_calm_ballast,
+    )
+
+    scenarios = [
+        {
+            "name": "Calm Water (Laden)",
+            "conditions": f"{specs.service_speed_laden} kts, no wind/waves",
+            "fuel_mt": round(calm_laden["fuel_mt"], 2),
+            "power_kw": round(calm_laden["power_kw"], 0),
+        },
+        {
+            "name": "Head Wind (Laden)",
+            "conditions": f"{specs.service_speed_laden} kts, 20 kt head wind",
+            "fuel_mt": round(headwind_laden["fuel_mt"], 2),
+            "power_kw": round(headwind_laden["power_kw"], 0),
+        },
+        {
+            "name": "Rough Seas (Laden)",
+            "conditions": f"{specs.service_speed_laden} kts, 3m waves",
+            "fuel_mt": round(roughsea_laden["fuel_mt"], 2),
+            "power_kw": round(roughsea_laden["power_kw"], 0),
+        },
+        {
+            "name": "Calm Water (Ballast)",
+            "conditions": f"{specs.service_speed_ballast} kts, no wind/waves",
+            "fuel_mt": round(calm_ballast["fuel_mt"], 2),
+            "power_kw": round(calm_ballast["power_kw"], 0),
+        },
+    ]
+
+    return {"scenarios": scenarios}
+
+
+class PerformancePredictionRequest(BaseModel):
+    """Request for vessel performance prediction under given conditions."""
+    is_laden: bool = True
+    engine_load_pct: float = Field(85.0, ge=15, le=100, description="Engine load as % of MCR")
+    heading_deg: float = Field(0.0, ge=0, le=360, description="Vessel heading (degrees)")
+    wind_speed_kts: float = Field(0.0, ge=0, le=100, description="True wind speed (knots)")
+    wind_dir_deg: float = Field(0.0, ge=0, le=360, description="True wind direction (from, degrees)")
+    wave_height_m: float = Field(0.0, ge=0, le=15, description="Significant wave height (m)")
+    wave_dir_deg: float = Field(0.0, ge=0, le=360, description="Wave direction (from, degrees)")
+    current_speed_kts: float = Field(0.0, ge=0, le=10, description="Current speed (knots)")
+    current_dir_deg: float = Field(0.0, ge=0, le=360, description="Current direction (flowing toward, degrees)")
+
+
+@app.post("/api/vessel/predict", tags=["Vessel"])
+async def predict_vessel_performance(req: PerformancePredictionRequest):
+    """
+    Predict vessel speed and fuel consumption under given conditions.
+
+    Solves the inverse problem: for a given engine load and weather, what
+    speed will the vessel achieve and how much fuel will it burn?
+
+    Returns STW, SOG (after current), fuel/day, fuel/nm, SFOC, resistance
+    breakdown, and speed loss from weather.
+    """
+    model = current_vessel_model
+
+    weather = None
+    if req.wind_speed_kts > 0 or req.wave_height_m > 0:
+        weather = {
+            "wind_speed_ms": req.wind_speed_kts * 0.51444,
+            "wind_dir_deg": req.wind_dir_deg,
+            "sig_wave_height_m": req.wave_height_m,
+            "wave_dir_deg": req.wave_dir_deg,
+        }
+
+    current_ms = req.current_speed_kts * 0.51444
+
+    result = model.predict_performance(
+        is_laden=req.is_laden,
+        weather=weather,
+        engine_load_pct=req.engine_load_pct,
+        current_speed_ms=current_ms,
+        current_dir_deg=req.current_dir_deg,
+        heading_deg=req.heading_deg,
+    )
+
+    return result
 
 
 # ============================================================================
@@ -6390,6 +6591,7 @@ async def calibrate_from_engine_log(
                 'calm_water': current_calibration.calm_water,
                 'wind': current_calibration.wind,
                 'waves': current_calibration.waves,
+                'sfoc_factor': current_calibration.sfoc_factor,
             }
         )
         voyage_calculator = VoyageCalculator(vessel_model=current_vessel_model)

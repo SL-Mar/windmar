@@ -101,6 +101,7 @@ class VesselModel:
         self,
         specs: Optional[VesselSpecs] = None,
         calibration_factors: Optional[Dict[str, float]] = None,
+        wave_method: str = "stawave1",
     ):
         """
         Initialize vessel model.
@@ -108,13 +109,18 @@ class VesselModel:
         Args:
             specs: Vessel specifications (defaults to MR tanker)
             calibration_factors: Optional calibration factors from noon reports
+            wave_method: Wave added resistance method ('stawave1' or 'kwon')
         """
         self.specs = specs or VesselSpecs()
         self.calibration_factors = calibration_factors or {
             "calm_water": 1.0,
             "wind": 1.0,
             "waves": 1.0,
+            "sfoc_factor": 1.0,
         }
+        if wave_method not in ("stawave1", "kwon"):
+            raise ValueError(f"Unknown wave_method: {wave_method!r}")
+        self.wave_method = wave_method
 
     def calculate_fuel_consumption(
         self,
@@ -380,7 +386,39 @@ class VesselModel:
         is_laden: bool,
     ) -> float:
         """
-        Calculate added resistance in waves using STAWAVE-1 (ISO 15016).
+        Calculate added resistance in waves.
+
+        Dispatches to STAWAVE-1 (ISO 15016) or Kwon's method based on
+        self.wave_method setting.
+
+        Args:
+            sig_wave_height_m: Significant wave height (m)
+            wave_dir_deg: Wave direction (coming from, degrees)
+            heading_deg: Vessel heading (degrees)
+            speed_ms: Vessel speed (m/s)
+            is_laden: Loading condition
+
+        Returns:
+            Added wave resistance (N)
+        """
+        if self.wave_method == "kwon":
+            return self._kwon_wave_resistance(
+                sig_wave_height_m, wave_dir_deg, heading_deg, speed_ms, is_laden,
+            )
+        return self._stawave1_wave_resistance(
+            sig_wave_height_m, wave_dir_deg, heading_deg, speed_ms, is_laden,
+        )
+
+    def _stawave1_wave_resistance(
+        self,
+        sig_wave_height_m: float,
+        wave_dir_deg: float,
+        heading_deg: float,
+        speed_ms: float,
+        is_laden: bool,
+    ) -> float:
+        """
+        STAWAVE-1 added resistance in waves (ISO 15016).
 
         Args:
             sig_wave_height_m: Significant wave height (m)
@@ -415,11 +453,93 @@ class VesselModel:
 
         return raw
 
+    def _kwon_wave_resistance(
+        self,
+        sig_wave_height_m: float,
+        wave_dir_deg: float,
+        heading_deg: float,
+        speed_ms: float,
+        is_laden: bool,
+    ) -> float:
+        """
+        Kwon's method for added resistance in waves (TN001).
+
+        Estimates involuntary speed loss as a percentage, then converts
+        to an equivalent added resistance using the cubic power-speed
+        relationship.
+
+        Args:
+            sig_wave_height_m: Significant wave height (m)
+            wave_dir_deg: Wave direction (coming from, degrees)
+            heading_deg: Vessel heading (degrees)
+            speed_ms: Vessel speed (m/s)
+            is_laden: Loading condition
+
+        Returns:
+            Added wave resistance (N)
+        """
+        if speed_ms <= 0:
+            return 0.0
+
+        # Relative angle: 0° = head seas, 180° = following seas
+        relative_angle = abs(((wave_dir_deg - heading_deg) + 180) % 360 - 180)
+
+        cb = self.specs.cb_laden if is_laden else self.specs.cb_ballast
+        lpp = self.specs.lpp
+
+        # Kwon base speed loss coefficient (% per metre Hs)
+        # For tankers/bulk carriers (CB > 0.75): ~3% per metre Hs head seas
+        # Adjusted by Cb and Lpp
+        cb_factor = 1.7 - 0.9 * cb  # Higher CB = less speed loss
+        length_factor = max(0.5, min(1.5, 180.0 / lpp))  # Shorter ship = more loss
+
+        base_loss_pct_per_m = 3.0 * cb_factor * length_factor
+
+        # Directional reduction factor
+        # Head seas (0°): 1.0, beam seas (90°): 0.7, following seas (180°): 0.2
+        if relative_angle <= 30:
+            dir_factor = 1.0
+        elif relative_angle <= 60:
+            dir_factor = 0.9
+        elif relative_angle <= 90:
+            dir_factor = 0.7
+        elif relative_angle <= 150:
+            dir_factor = 0.4
+        else:
+            dir_factor = 0.2
+
+        # Speed loss percentage
+        delta_v_pct = base_loss_pct_per_m * sig_wave_height_m * dir_factor
+        delta_v_pct = min(delta_v_pct, 50.0)  # Cap at 50%
+
+        # Convert speed loss to equivalent added resistance:
+        # P ∝ V³ → ΔP/P ≈ 3 * ΔV/V for small losses
+        # R = P/V → ΔR/R ≈ 2 * ΔV/V (since P = R*V)
+        # For added resistance at constant speed:
+        # R_added = R_calm * (2 * delta_v_pct / 100)
+        # We approximate R_calm from tow power at current speed
+        draft = self.specs.draft_laden if is_laden else self.specs.draft_ballast
+        displacement = (
+            self.specs.displacement_laden if is_laden
+            else self.specs.displacement_ballast
+        )
+        wetted_surface = (
+            self.specs.wetted_surface_laden if is_laden
+            else self.specs.wetted_surface_ballast
+        )
+
+        r_calm = self._holtrop_mennen_resistance(
+            speed_ms, draft, displacement, cb, wetted_surface,
+        )
+
+        r_wave = r_calm * 2.0 * (delta_v_pct / 100.0)
+        return r_wave
+
     def _sfoc_curve(self, load_fraction: float) -> float:
         """
         Calculate specific fuel oil consumption at given load.
 
-        Uses typical 2-stroke diesel SFOC curve.
+        Uses typical 2-stroke diesel SFOC curve, scaled by calibration sfoc_factor.
 
         Args:
             load_fraction: Engine load as fraction of MCR (0-1)
@@ -438,6 +558,9 @@ class VesselModel:
         else:
             # At and above optimal load
             sfoc = self.specs.sfoc_at_mcr * (1.0 + 0.05 * (load_fraction - 0.75))
+
+        # Apply calibration SFOC factor (engine degradation / actual measurement)
+        sfoc *= self.calibration_factors.get('sfoc_factor', 1.0)
 
         return sfoc
 
@@ -477,3 +600,144 @@ class VesselModel:
         # Find speed at minimum SFOC (best engine efficiency)
         optimal_idx = int(np.argmin(sfoc_values))
         return float(speeds[optimal_idx])
+
+    def predict_performance(
+        self,
+        is_laden: bool,
+        weather: Optional[Dict[str, float]] = None,
+        engine_load_pct: float = 85.0,
+        current_speed_ms: float = 0.0,
+        current_dir_deg: float = 0.0,
+        heading_deg: float = 0.0,
+    ) -> Dict[str, float]:
+        """
+        Predict achievable speed and fuel consumption for given conditions.
+
+        Solves the inverse problem: given a target engine power output and
+        weather conditions, find the equilibrium speed where required brake
+        power equals target power. Then applies ocean current for SOG.
+
+        Args:
+            is_laden: Loading condition
+            weather: Weather conditions dict (wind_speed_ms, wind_dir_deg,
+                     sig_wave_height_m, wave_dir_deg, heading_deg)
+            engine_load_pct: Target engine load as % of MCR (0-100)
+            current_speed_ms: Ocean current speed (m/s)
+            current_dir_deg: Ocean current direction (flowing toward, degrees)
+            heading_deg: Vessel heading (degrees, 0=North)
+
+        Returns:
+            Dictionary with:
+                - stw_kts: Speed through water (knots)
+                - sog_kts: Speed over ground (knots, after current)
+                - fuel_per_day_mt: Daily fuel consumption (MT/day)
+                - fuel_per_nm_mt: Fuel per nautical mile (MT/nm)
+                - power_kw: Engine brake power (kW)
+                - load_pct: Actual engine load (%)
+                - sfoc_gkwh: SFOC at this load (g/kWh)
+                - resistance_breakdown_kn: Resistance by component (kN)
+                - speed_loss_from_service_pct: % speed loss vs calm water
+                - current_effect_kts: Current contribution to SOG (kts)
+        """
+        engine_load_pct = max(15.0, min(100.0, engine_load_pct))
+        target_power_kw = self.specs.mcr_kw * (engine_load_pct / 100.0)
+
+        # Inject heading into weather dict for consistent angle calculations
+        if weather:
+            weather = dict(weather)
+            weather['heading_deg'] = heading_deg
+
+        # Bisection: find speed where required_power = target_power
+        # Required power increases monotonically with speed (cubic-ish)
+        v_lo, v_hi = 2.0, 25.0  # knots search range
+
+        def _power_at_speed(speed_kts: float) -> float:
+            """Required brake power at this speed."""
+            r = self.calculate_fuel_consumption(
+                speed_kts, is_laden, weather, distance_nm=1.0,
+            )
+            return r["required_power_kw"]
+
+        # Ensure target is within achievable range
+        p_lo = _power_at_speed(v_lo)
+        p_hi = _power_at_speed(v_hi)
+
+        if target_power_kw <= p_lo:
+            # Even minimum speed exceeds target — use minimum
+            stw_kts = v_lo
+        elif target_power_kw >= p_hi:
+            # Target exceeds maximum speed power — cap at v_hi
+            stw_kts = v_hi
+        else:
+            # Bisection (30 iterations → precision ~0.001 kts)
+            for _ in range(30):
+                v_mid = (v_lo + v_hi) / 2.0
+                p_mid = _power_at_speed(v_mid)
+                if p_mid < target_power_kw:
+                    v_lo = v_mid
+                else:
+                    v_hi = v_mid
+            stw_kts = (v_lo + v_hi) / 2.0
+
+        # Calculate full results at equilibrium speed
+        result = self.calculate_fuel_consumption(
+            stw_kts, is_laden, weather, distance_nm=stw_kts * 24,
+        )
+
+        # Current effect on SOG
+        # Project current along vessel heading
+        current_effect_kts = 0.0
+        if current_speed_ms > 0:
+            # Current direction is "flowing toward" — same convention as heading
+            relative_current_angle = math.radians(current_dir_deg - heading_deg)
+            current_along_kts = (current_speed_ms / 0.51444) * math.cos(relative_current_angle)
+            current_effect_kts = current_along_kts
+
+        sog_kts = max(0.0, stw_kts + current_effect_kts)
+
+        # Fuel metrics
+        fuel_per_day_mt = result["fuel_mt"]  # Already 24h distance
+        fuel_per_nm_mt = fuel_per_day_mt / (sog_kts * 24) if sog_kts > 0 else 0.0
+
+        # Speed loss from calm-water service speed
+        service_speed = (
+            self.specs.service_speed_laden if is_laden
+            else self.specs.service_speed_ballast
+        )
+        # Calm-water speed at same power
+        calm_result = self.calculate_fuel_consumption(
+            stw_kts, is_laden, weather=None, distance_nm=1.0,
+        )
+        # Find what speed we'd get in calm water at same power
+        calm_stw = stw_kts  # Start with same speed
+        if weather:
+            # Re-run bisection without weather
+            v_lo_c, v_hi_c = 2.0, 25.0
+            for _ in range(30):
+                v_mid = (v_lo_c + v_hi_c) / 2.0
+                r = self.calculate_fuel_consumption(v_mid, is_laden, None, distance_nm=1.0)
+                if r["required_power_kw"] < target_power_kw:
+                    v_lo_c = v_mid
+                else:
+                    v_hi_c = v_mid
+            calm_stw = (v_lo_c + v_hi_c) / 2.0
+
+        speed_loss_pct = ((calm_stw - stw_kts) / calm_stw * 100) if calm_stw > 0 else 0.0
+
+        load_pct = result["power_kw"] / self.specs.mcr_kw * 100
+        sfoc = self._sfoc_curve(result["power_kw"] / self.specs.mcr_kw)
+
+        return {
+            "stw_kts": round(stw_kts, 2),
+            "sog_kts": round(sog_kts, 2),
+            "fuel_per_day_mt": round(fuel_per_day_mt, 3),
+            "fuel_per_nm_mt": round(fuel_per_nm_mt, 4),
+            "power_kw": round(result["power_kw"], 0),
+            "load_pct": round(load_pct, 1),
+            "sfoc_gkwh": round(sfoc, 1),
+            "resistance_breakdown_kn": result["resistance_breakdown_kn"],
+            "speed_loss_from_weather_pct": round(max(0, speed_loss_pct), 1),
+            "calm_water_speed_kts": round(calm_stw, 2),
+            "current_effect_kts": round(current_effect_kts, 2),
+            "service_speed_kts": service_speed,
+        }

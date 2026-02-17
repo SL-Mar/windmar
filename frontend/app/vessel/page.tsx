@@ -11,7 +11,8 @@ import {
 } from 'lucide-react';
 import {
   apiClient, VesselSpecs, FuelScenario,
-  CalibrationStatus, CalibrationResult,
+  CalibrationStatus, CalibrationResult, VesselModelStatus,
+  PerformancePredictionRequest, PerformancePredictionResult,
 } from '@/lib/api';
 import { formatFuel, formatPower } from '@/lib/utils';
 import { useVoyage } from '@/components/VoyageContext';
@@ -155,6 +156,9 @@ function SpecificationsSection() {
         </Card>
       </div>
 
+      {/* Model Parameters (read-only derived values) */}
+      <ModelParametersCard />
+
       <div className="mt-8 flex items-center justify-between">
         <button
           onClick={handleReset}
@@ -172,6 +176,60 @@ function SpecificationsSection() {
           <span>{saving ? 'Saving...' : 'Save Changes'}</span>
         </button>
       </div>
+    </div>
+  );
+}
+
+function ModelParametersCard() {
+  const [model, setModel] = useState<VesselModelStatus | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const data = await apiClient.getVesselModelStatus();
+        setModel(data);
+      } catch (error) {
+        console.error('Failed to load model status:', error);
+      }
+    })();
+  }, []);
+
+  if (!model) return null;
+
+  const { hull_form, areas } = model.specifications;
+  const { computed } = model;
+
+  return (
+    <div className="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <Card title="Hull Form" icon={<Anchor className="w-5 h-5" />}>
+        <div className="space-y-2 text-sm">
+          <ReadOnlyField label="Block Coefficient (Laden)" value={hull_form.cb_laden.toFixed(3)} />
+          <ReadOnlyField label="Block Coefficient (Ballast)" value={hull_form.cb_ballast.toFixed(3)} />
+          <ReadOnlyField label="Wetted Surface (Laden)" value={`${hull_form.wetted_surface_laden.toLocaleString()} m\u00B2`} />
+          <ReadOnlyField label="Wetted Surface (Ballast)" value={`${hull_form.wetted_surface_ballast.toLocaleString()} m\u00B2`} />
+        </div>
+      </Card>
+
+      <Card title="Propulsion Areas & Performance" icon={<Gauge className="w-5 h-5" />}>
+        <div className="space-y-2 text-sm">
+          <ReadOnlyField label="Frontal Area (Laden / Ballast)" value={`${areas.frontal_area_laden} / ${areas.frontal_area_ballast} m\u00B2`} />
+          <ReadOnlyField label="Lateral Area (Laden / Ballast)" value={`${areas.lateral_area_laden} / ${areas.lateral_area_ballast} m\u00B2`} />
+          <ReadOnlyField label="Optimal Speed (Laden)" value={`${computed.optimal_speed_laden_kts} kts`} />
+          <ReadOnlyField label="Optimal Speed (Ballast)" value={`${computed.optimal_speed_ballast_kts} kts`} />
+          <ReadOnlyField label="Daily Fuel at Service (Laden)" value={`${computed.daily_fuel_service_laden_mt} MT`} />
+          <ReadOnlyField label="Daily Fuel at Service (Ballast)" value={`${computed.daily_fuel_service_ballast_mt} MT`} />
+          <ReadOnlyField label="Wave Method" value={model.wave_method === 'kwon' ? "Kwon's Method" : 'STAWAVE-1 (ISO 15016)'} />
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function ReadOnlyField({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between py-1.5 border-b border-white/5 last:border-0">
+      <span className="text-gray-400">{label}</span>
+      <span className="text-white font-medium">{value}</span>
     </div>
   );
 }
@@ -278,6 +336,25 @@ function CalibrationSection() {
             <Info className="w-5 h-5 text-gray-400 ml-auto" />
           )}
         </div>
+
+        {/* Calibration timestamp */}
+        {calibration?.calibrated && calibration.calibrated_at && (
+          <div className="mb-3 px-2 py-1.5 bg-maritime-dark rounded text-xs text-gray-300">
+            <span className="text-gray-500">Last calibrated:</span>{' '}
+            {(() => {
+              const d = new Date(calibration.calibrated_at);
+              const ago = Math.round((Date.now() - d.getTime()) / 60000);
+              const relative = ago < 60 ? `${ago}m ago` : ago < 1440 ? `${Math.round(ago / 60)}h ago` : `${Math.round(ago / 1440)}d ago`;
+              return `${d.toLocaleString()} (${relative})`;
+            })()}
+            {calibration.days_since_drydock !== undefined && calibration.days_since_drydock > 0 && (
+              <span className="ml-3 text-gray-500">Drydock: <span className="text-gray-300">{calibration.days_since_drydock}d ago</span></span>
+            )}
+            {calibration.calibration_error_mt !== undefined && calibration.calibration_error_mt > 0 && (
+              <span className="ml-3 text-gray-500">Error: <span className="text-gray-300">{calibration.calibration_error_mt.toFixed(2)} MT</span></span>
+            )}
+          </div>
+        )}
 
         {/* Current factors */}
         {calibration && (
@@ -424,12 +501,22 @@ function FuelAnalysisSection() {
     })();
   }, []);
 
-  const chartData = scenarios.map((s) => ({
-    name: s.name.replace(' (Laden)', '').replace(' (Ballast)', ''),
-    calm_water: s.fuel_mt * 0.6,
-    wind: s.fuel_mt * 0.25,
-    waves: s.fuel_mt * 0.15,
-  }));
+  const chartData = scenarios.map((s) => {
+    const isCalm = s.name.includes('Calm');
+    const hasWind = s.name.includes('Wind');
+    const hasWaves = s.name.includes('Rough');
+    // Approximate breakdown: calm scenarios are all calm_water;
+    // wind scenario splits ~65/30/5; rough seas ~55/15/30
+    const cw = isCalm ? s.fuel_mt : hasWind ? s.fuel_mt * 0.65 : s.fuel_mt * 0.55;
+    const wi = isCalm ? 0 : hasWind ? s.fuel_mt * 0.30 : s.fuel_mt * 0.15;
+    const wa = isCalm ? 0 : hasWind ? s.fuel_mt * 0.05 : s.fuel_mt * 0.30;
+    return {
+      name: s.name.replace(' (Laden)', '').replace(' (Ballast)', ''),
+      calm_water: cw,
+      wind: wi,
+      waves: wa,
+    };
+  });
 
   if (loading) {
     return (
@@ -441,6 +528,9 @@ function FuelAnalysisSection() {
 
   return (
     <div className="space-y-6">
+      {/* Performance Predictor */}
+      <PerformancePredictor />
+
       {/* Scenarios Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         {scenarios.map((scenario, idx) => (
@@ -470,6 +560,221 @@ function FuelAnalysisSection() {
             <OpportunityItem title="Route Planning" description="Choose fuel-optimal waypoints" savings="5-10%" />
           </div>
         </Card>
+      </div>
+    </div>
+  );
+}
+
+// ─── Performance Predictor ────────────────────────────────────────────────────
+
+function PerformancePredictor() {
+  const [isLaden, setIsLaden] = useState(true);
+  const [engineLoad, setEngineLoad] = useState(85);
+  const [heading, setHeading] = useState(0);
+  const [windSpeed, setWindSpeed] = useState(0);
+  const [windDir, setWindDir] = useState(0);
+  const [waveHeight, setWaveHeight] = useState(0);
+  const [waveDir, setWaveDir] = useState(0);
+  const [currentSpeed, setCurrentSpeed] = useState(0);
+  const [currentDir, setCurrentDir] = useState(0);
+  const [result, setResult] = useState<PerformancePredictionResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const predict = useCallback(async () => {
+    setLoading(true);
+    try {
+      const r = await apiClient.predictPerformance({
+        is_laden: isLaden,
+        engine_load_pct: engineLoad,
+        heading_deg: heading,
+        wind_speed_kts: windSpeed,
+        wind_dir_deg: windDir,
+        wave_height_m: waveHeight,
+        wave_dir_deg: waveDir,
+        current_speed_kts: currentSpeed,
+        current_dir_deg: currentDir,
+      });
+      setResult(r);
+    } catch (err) {
+      console.error('Prediction failed:', err);
+    } finally {
+      setLoading(false);
+    }
+  }, [isLaden, engineLoad, heading, windSpeed, windDir, waveHeight, waveDir, currentSpeed, currentDir]);
+
+  // Auto-predict on input change with debounce
+  useEffect(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(predict, 400);
+    return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
+  }, [predict]);
+
+  return (
+    <Card title="Performance Predictor" icon={<Gauge className="w-5 h-5" />}>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Inputs */}
+        <div className="space-y-4">
+          {/* Loading condition toggle */}
+          <div className="flex items-center gap-3">
+            <span className="text-sm text-gray-400">Condition:</span>
+            <button
+              onClick={() => setIsLaden(true)}
+              className={`px-3 py-1 rounded text-xs font-medium transition-colors ${isLaden ? 'bg-primary-500 text-white' : 'bg-maritime-dark text-gray-400 hover:text-white'}`}
+            >Laden</button>
+            <button
+              onClick={() => setIsLaden(false)}
+              className={`px-3 py-1 rounded text-xs font-medium transition-colors ${!isLaden ? 'bg-primary-500 text-white' : 'bg-maritime-dark text-gray-400 hover:text-white'}`}
+            >Ballast</button>
+          </div>
+
+          <SliderField label="Engine Load" value={engineLoad} onChange={setEngineLoad} min={15} max={100} step={5} unit="% MCR" />
+          <SliderField label="Heading" value={heading} onChange={setHeading} min={0} max={350} step={10} unit="deg" />
+
+          <div className="border-t border-white/5 pt-3">
+            <div className="text-xs text-gray-500 mb-2 flex items-center gap-1"><Wind className="w-3 h-3" /> Wind & Waves</div>
+            <div className="space-y-3">
+              <SliderField label="Wind Speed" value={windSpeed} onChange={setWindSpeed} min={0} max={60} step={5} unit="kts" />
+              <SliderField label="Wind Direction" value={windDir} onChange={setWindDir} min={0} max={350} step={10} unit="deg" />
+              <SliderField label="Wave Height" value={waveHeight} onChange={setWaveHeight} min={0} max={8} step={0.5} unit="m" />
+              <SliderField label="Wave Direction" value={waveDir} onChange={setWaveDir} min={0} max={350} step={10} unit="deg" />
+            </div>
+          </div>
+
+          <div className="border-t border-white/5 pt-3">
+            <div className="text-xs text-gray-500 mb-2">Current</div>
+            <div className="space-y-3">
+              <SliderField label="Current Speed" value={currentSpeed} onChange={setCurrentSpeed} min={0} max={5} step={0.5} unit="kts" />
+              <SliderField label="Current Direction" value={currentDir} onChange={setCurrentDir} min={0} max={350} step={10} unit="deg" />
+            </div>
+          </div>
+        </div>
+
+        {/* Results */}
+        <div>
+          {loading && !result && (
+            <div className="flex items-center justify-center h-full">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary-400" />
+            </div>
+          )}
+          {result && (
+            <div className="space-y-3">
+              {/* Primary metrics */}
+              <div className="grid grid-cols-2 gap-3">
+                <MetricBox label="Speed Through Water" value={`${result.stw_kts}`} unit="kts" large />
+                <MetricBox label="Speed Over Ground" value={`${result.sog_kts}`} unit="kts" large />
+                <MetricBox label="Fuel / Day" value={`${result.fuel_per_day_mt}`} unit="MT" large />
+                <MetricBox label="Fuel / NM" value={`${result.fuel_per_nm_mt}`} unit="MT" />
+              </div>
+
+              {/* Engine state */}
+              <div className="bg-maritime-dark rounded-lg p-3 space-y-2 text-sm">
+                <div className="flex justify-between">
+                  <span className="text-gray-400">Power</span>
+                  <span className="text-white font-medium">{formatPower(result.power_kw)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-400">Engine Load</span>
+                  <span className="text-white font-medium">{result.load_pct}%</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-400">SFOC</span>
+                  <span className="text-white font-medium">{result.sfoc_gkwh} g/kWh</span>
+                </div>
+              </div>
+
+              {/* Weather impact */}
+              {result.speed_loss_from_weather_pct > 0 && (
+                <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 text-sm">
+                  <div className="flex items-center gap-2 text-amber-400 mb-1">
+                    <Wind className="w-4 h-4" />
+                    <span className="font-medium">Weather Impact</span>
+                  </div>
+                  <div className="text-gray-300">
+                    Speed loss: <span className="text-amber-400 font-medium">{result.speed_loss_from_weather_pct}%</span>
+                    <span className="text-gray-500 ml-2">({result.calm_water_speed_kts} kts in calm water)</span>
+                  </div>
+                </div>
+              )}
+
+              {/* Current effect */}
+              {result.current_effect_kts !== 0 && (
+                <div className={`${result.current_effect_kts > 0 ? 'bg-green-500/10 border-green-500/20' : 'bg-red-500/10 border-red-500/20'} border rounded-lg p-3 text-sm`}>
+                  <span className="text-gray-300">Current effect: </span>
+                  <span className={`font-medium ${result.current_effect_kts > 0 ? 'text-green-400' : 'text-red-400'}`}>
+                    {result.current_effect_kts > 0 ? '+' : ''}{result.current_effect_kts} kts
+                  </span>
+                </div>
+              )}
+
+              {/* Resistance breakdown */}
+              <div className="bg-maritime-dark rounded-lg p-3 text-sm">
+                <div className="text-gray-500 text-xs mb-2">Resistance Breakdown</div>
+                <ResistanceBar
+                  calm={result.resistance_breakdown_kn.calm_water}
+                  wind={result.resistance_breakdown_kn.wind}
+                  waves={result.resistance_breakdown_kn.waves}
+                  total={result.resistance_breakdown_kn.total}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function SliderField({ label, value, onChange, min, max, step, unit }: {
+  label: string; value: number; onChange: (v: number) => void;
+  min: number; max: number; step: number; unit: string;
+}) {
+  return (
+    <div className="flex items-center gap-3">
+      <span className="text-xs text-gray-400 w-28 shrink-0">{label}</span>
+      <input
+        type="range" min={min} max={max} step={step} value={value}
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        className="flex-1 h-1.5 accent-primary-500"
+      />
+      <span className="text-xs text-white w-16 text-right font-mono">{value} {unit}</span>
+    </div>
+  );
+}
+
+function MetricBox({ label, value, unit, large }: {
+  label: string; value: string; unit: string; large?: boolean;
+}) {
+  return (
+    <div className="bg-maritime-dark rounded-lg p-3">
+      <div className="text-gray-500 text-xs mb-1">{label}</div>
+      <div className="flex items-baseline gap-1">
+        <span className={`text-white font-bold ${large ? 'text-xl' : 'text-base'}`}>{value}</span>
+        <span className="text-gray-400 text-xs">{unit}</span>
+      </div>
+    </div>
+  );
+}
+
+function ResistanceBar({ calm, wind, waves, total }: {
+  calm: number; wind: number; waves: number; total: number;
+}) {
+  if (total <= 0) return null;
+  const cPct = (calm / total) * 100;
+  const wPct = (wind / total) * 100;
+  const vPct = (waves / total) * 100;
+  return (
+    <div>
+      <div className="flex h-3 rounded-full overflow-hidden mb-2">
+        <div className="bg-blue-500" style={{ width: `${cPct}%` }} title={`Calm: ${calm.toFixed(1)} kN`} />
+        <div className="bg-cyan-400" style={{ width: `${wPct}%` }} title={`Wind: ${wind.toFixed(1)} kN`} />
+        <div className="bg-teal-400" style={{ width: `${vPct}%` }} title={`Waves: ${waves.toFixed(1)} kN`} />
+      </div>
+      <div className="flex justify-between text-xs">
+        <span className="text-blue-400">Calm {cPct.toFixed(0)}%</span>
+        <span className="text-cyan-400">Wind {wPct.toFixed(0)}%</span>
+        <span className="text-teal-400">Waves {vPct.toFixed(0)}%</span>
+        <span className="text-gray-400">Total: {total.toFixed(1)} kN</span>
       </div>
     </div>
   );

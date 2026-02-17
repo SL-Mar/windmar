@@ -144,13 +144,14 @@ class VesselState:
         with self._lock:
             self._calibration = calibration_factors
 
-            # Rebuild model with calibration
+            # Rebuild model with calibration (including sfoc_factor)
             self._model = VesselModel(
                 specs=self._specs,
                 calibration_factors={
                     'calm_water': calibration_factors.calm_water,
                     'wind': calibration_factors.wind,
                     'waves': calibration_factors.waves,
+                    'sfoc_factor': calibration_factors.sfoc_factor,
                 }
             )
             self._voyage_calculator = VoyageCalculator(vessel_model=self._model)
