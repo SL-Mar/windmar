@@ -5619,10 +5619,7 @@ async def startup_event():
     except Exception as e:
         logger.warning("Could not load vessel specs from DB (using defaults): %s", e)
 
-    # Start background ingestion loop
-    if weather_ingestion is not None:
-        asyncio.create_task(_ingestion_loop())
-        logger.info("Weather ingestion background loop started")
+    logger.info("Startup complete")
 
 
 def _cleanup_stale_caches():
