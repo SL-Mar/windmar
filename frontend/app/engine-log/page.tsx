@@ -21,9 +21,30 @@ import {
 
 type EngineLogTab = 'upload' | 'entries' | 'analytics' | 'performance';
 
+export interface EngineLogFilters {
+  event: string;
+  dateFrom: string;
+  dateTo: string;
+  minRpm: string;
+  batch: string;
+}
+
+const EMPTY_FILTERS: EngineLogFilters = { event: '', dateFrom: '', dateTo: '', minRpm: '', batch: '' };
+
+function filtersToParams(filters: EngineLogFilters): Omit<EngineLogEntriesParams, 'limit' | 'offset'> {
+  const params: EngineLogEntriesParams = {};
+  if (filters.event) params.event = filters.event;
+  if (filters.dateFrom) params.date_from = filters.dateFrom;
+  if (filters.dateTo) params.date_to = filters.dateTo;
+  if (filters.minRpm) params.min_rpm = parseFloat(filters.minRpm);
+  if (filters.batch) params.batch_id = filters.batch;
+  return params;
+}
+
 export default function EngineLogPage() {
   const [activeTab, setActiveTab] = useState<EngineLogTab>('upload');
   const [summary, setSummary] = useState<EngineLogSummaryResponse | null>(null);
+  const [filters, setFilters] = useState<EngineLogFilters>(EMPTY_FILTERS);
 
   const loadSummary = useCallback(async () => {
     try {
@@ -50,9 +71,9 @@ export default function EngineLogPage() {
         </div>
 
         {activeTab === 'upload' && <UploadSection summary={summary} onRefresh={loadSummary} />}
-        {activeTab === 'entries' && <EntriesSection summary={summary} />}
-        {activeTab === 'analytics' && <AnalyticsSection summary={summary} />}
-        {activeTab === 'performance' && <PerformanceSection />}
+        {activeTab === 'entries' && <EntriesSection summary={summary} filters={filters} onFiltersChange={setFilters} />}
+        {activeTab === 'analytics' && <AnalyticsSection summary={summary} filters={filters} />}
+        {activeTab === 'performance' && <PerformanceSection filters={filters} />}
       </main>
     </div>
   );
@@ -242,31 +263,24 @@ const EVENT_BADGE_COLORS: Record<string, string> = {
   BUNKERING: 'bg-pink-500/20 text-pink-300',
 };
 
-function EntriesSection({ summary }: { summary: EngineLogSummaryResponse | null }) {
+function EntriesSection({ summary, filters, onFiltersChange }: {
+  summary: EngineLogSummaryResponse | null;
+  filters: EngineLogFilters;
+  onFiltersChange: (f: EngineLogFilters) => void;
+}) {
   const [entries, setEntries] = useState<EngineLogEntryResponse[]>([]);
   const [loading, setLoading] = useState(false);
   const [pageSize, setPageSize] = useState(25);
   const [offset, setOffset] = useState(0);
 
-  // Filters
-  const [filterEvent, setFilterEvent] = useState('');
-  const [filterDateFrom, setFilterDateFrom] = useState('');
-  const [filterDateTo, setFilterDateTo] = useState('');
-  const [filterMinRpm, setFilterMinRpm] = useState('');
-  const [filterBatch, setFilterBatch] = useState('');
-
   const fetchEntries = useCallback(async (newOffset: number) => {
     setLoading(true);
     try {
       const params: EngineLogEntriesParams = {
+        ...filtersToParams(filters),
         limit: pageSize,
         offset: newOffset,
       };
-      if (filterEvent) params.event = filterEvent;
-      if (filterDateFrom) params.date_from = filterDateFrom;
-      if (filterDateTo) params.date_to = filterDateTo;
-      if (filterMinRpm) params.min_rpm = parseFloat(filterMinRpm);
-      if (filterBatch) params.batch_id = filterBatch;
 
       const data = await apiClient.getEngineLogEntries(params);
       setEntries(data);
@@ -276,18 +290,15 @@ function EntriesSection({ summary }: { summary: EngineLogSummaryResponse | null 
     } finally {
       setLoading(false);
     }
-  }, [pageSize, filterEvent, filterDateFrom, filterDateTo, filterMinRpm, filterBatch]);
+  }, [pageSize, filters]);
 
   useEffect(() => { fetchEntries(0); }, [fetchEntries]);
 
   const handleApply = () => fetchEntries(0);
-  const handleClear = () => {
-    setFilterEvent('');
-    setFilterDateFrom('');
-    setFilterDateTo('');
-    setFilterMinRpm('');
-    setFilterBatch('');
-  };
+  const handleClear = () => onFiltersChange(EMPTY_FILTERS);
+
+  const setFilter = (key: keyof EngineLogFilters, value: string) =>
+    onFiltersChange({ ...filters, [key]: value });
 
   const eventOptions = summary?.events_breakdown ? Object.keys(summary.events_breakdown) : [];
   const batchOptions = summary?.batches || [];
@@ -312,8 +323,8 @@ function EntriesSection({ summary }: { summary: EngineLogSummaryResponse | null 
         </div>
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
           <select
-            value={filterEvent}
-            onChange={(e) => setFilterEvent(e.target.value)}
+            value={filters.event}
+            onChange={(e) => setFilter('event', e.target.value)}
             className="bg-maritime-dark border border-white/10 rounded px-2 py-1.5 text-sm text-white"
           >
             <option value="">All Events</option>
@@ -323,28 +334,28 @@ function EntriesSection({ summary }: { summary: EngineLogSummaryResponse | null 
           </select>
           <input
             type="date"
-            value={filterDateFrom}
-            onChange={(e) => setFilterDateFrom(e.target.value)}
+            value={filters.dateFrom}
+            onChange={(e) => setFilter('dateFrom', e.target.value)}
             placeholder="From"
             className="bg-maritime-dark border border-white/10 rounded px-2 py-1.5 text-sm text-white"
           />
           <input
             type="date"
-            value={filterDateTo}
-            onChange={(e) => setFilterDateTo(e.target.value)}
+            value={filters.dateTo}
+            onChange={(e) => setFilter('dateTo', e.target.value)}
             placeholder="To"
             className="bg-maritime-dark border border-white/10 rounded px-2 py-1.5 text-sm text-white"
           />
           <input
             type="number"
-            value={filterMinRpm}
-            onChange={(e) => setFilterMinRpm(e.target.value)}
+            value={filters.minRpm}
+            onChange={(e) => setFilter('minRpm', e.target.value)}
             placeholder="Min RPM"
             className="bg-maritime-dark border border-white/10 rounded px-2 py-1.5 text-sm text-white"
           />
           <select
-            value={filterBatch}
-            onChange={(e) => setFilterBatch(e.target.value)}
+            value={filters.batch}
+            onChange={(e) => setFilter('batch', e.target.value)}
             className="bg-maritime-dark border border-white/10 rounded px-2 py-1.5 text-sm text-white"
           >
             <option value="">All Batches</option>
@@ -454,7 +465,7 @@ function EntriesSection({ summary }: { summary: EngineLogSummaryResponse | null 
 
 // ─── Analytics Section ──────────────────────────────────────────────────────
 
-function AnalyticsSection({ summary }: { summary: EngineLogSummaryResponse | null }) {
+function AnalyticsSection({ summary, filters }: { summary: EngineLogSummaryResponse | null; filters: EngineLogFilters }) {
   const [entries, setEntries] = useState<EngineLogEntryResponse[]>([]);
   const [loading, setLoading] = useState(true);
   const [calibrating, setCalibrating] = useState(false);
@@ -463,8 +474,9 @@ function AnalyticsSection({ summary }: { summary: EngineLogSummaryResponse | nul
 
   useEffect(() => {
     (async () => {
+      setLoading(true);
       try {
-        const data = await apiClient.getEngineLogEntries({ limit: 1000 });
+        const data = await apiClient.getEngineLogEntries({ ...filtersToParams(filters), limit: 5000 });
         setEntries(data);
       } catch (err) {
         console.error('Failed to load chart data:', err);
@@ -472,7 +484,7 @@ function AnalyticsSection({ summary }: { summary: EngineLogSummaryResponse | nul
         setLoading(false);
       }
     })();
-  }, []);
+  }, [filters]);
 
   const handleCalibrate = async () => {
     setCalibrating(true);
@@ -633,14 +645,15 @@ function AnalyticsSection({ summary }: { summary: EngineLogSummaryResponse | nul
 
 // ─── Performance Section ────────────────────────────────────────────────────
 
-function PerformanceSection() {
+function PerformanceSection({ filters }: { filters: EngineLogFilters }) {
   const [entries, setEntries] = useState<EngineLogEntryResponse[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     (async () => {
+      setLoading(true);
       try {
-        const data = await apiClient.getEngineLogEntries({ limit: 1000 });
+        const data = await apiClient.getEngineLogEntries({ ...filtersToParams(filters), limit: 5000 });
         setEntries(data);
       } catch (err) {
         console.error('Failed to load performance data:', err);
@@ -648,7 +661,7 @@ function PerformanceSection() {
         setLoading(false);
       }
     })();
-  }, []);
+  }, [filters]);
 
   if (loading) {
     return (
