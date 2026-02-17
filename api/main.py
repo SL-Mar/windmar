@@ -585,10 +585,10 @@ class VesselConfig(BaseModel):
     beam: float = 32.0
     draft_laden: float = 11.8
     draft_ballast: float = 6.5
-    mcr_kw: float = 8840.0
+    mcr_kw: float = 6600.0
     sfoc_at_mcr: float = 171.0
-    service_speed_laden: float = 14.5
-    service_speed_ballast: float = 15.0
+    service_speed_laden: float = 13.0
+    service_speed_ballast: float = 13.0
 
 
 class NoonReportModel(BaseModel):
@@ -4958,7 +4958,19 @@ async def update_vessel_specs(
         current_vessel_model = vessel_state.model
         voyage_calculator = vessel_state.voyage_calculator
 
-        return {"status": "success", "message": "Vessel specs updated"}
+        # Persist to DB so specs survive container restarts
+        try:
+            _save_vessel_specs_to_db({
+                'dwt': config.dwt, 'loa': config.loa, 'beam': config.beam,
+                'draft_laden': config.draft_laden, 'draft_ballast': config.draft_ballast,
+                'mcr_kw': config.mcr_kw, 'sfoc_at_mcr': config.sfoc_at_mcr,
+                'service_speed_laden': config.service_speed_laden,
+                'service_speed_ballast': config.service_speed_ballast,
+            })
+        except Exception as persist_err:
+            logger.warning("Failed to persist vessel specs to DB: %s", persist_err)
+
+        return {"status": "success", "message": "Vessel specs updated and persisted"}
 
     except Exception as e:
         logger.error(f"Failed to update vessel specs: {e}", exc_info=True)
@@ -5580,11 +5592,37 @@ def _is_wave_prefetch_running() -> bool:
 
 @app.on_event("startup")
 async def startup_event():
-    """Run database migrations and ensure cache directories exist on startup."""
+    """Run migrations, load persisted vessel specs, and start background weather ingestion."""
+    global current_vessel_specs, current_vessel_model, voyage_calculator
+    global route_optimizer, visir_optimizer, vessel_calibrator
+
     _run_weather_migrations()
+
     # Ensure cache dirs exist (volume mounts may lack subdirectories)
     for sub in ("wind", "wave", "current", "ice", "sst", "vis"):
         Path(f"/tmp/windmar_cache/{sub}").mkdir(parents=True, exist_ok=True)
+
+    # Load persisted vessel specs from DB (survives container restarts)
+    try:
+        saved_specs = _load_vessel_specs_from_db()
+        if saved_specs is not None:
+            vessel_state = get_vessel_state()
+            vessel_state.update_specs(saved_specs)
+            current_vessel_specs = vessel_state.specs
+            current_vessel_model = vessel_state.model
+            voyage_calculator = vessel_state.voyage_calculator
+            route_optimizer = vessel_state.route_optimizer
+            visir_optimizer = vessel_state.visir_optimizer
+            vessel_calibrator = VesselCalibrator(vessel_specs=current_vessel_specs)
+            logger.info("Vessel specs loaded from DB: %s kW / %s kts",
+                        saved_specs.get("mcr_kw"), saved_specs.get("service_speed_laden"))
+    except Exception as e:
+        logger.warning("Could not load vessel specs from DB (using defaults): %s", e)
+
+    # Start background ingestion loop
+    if weather_ingestion is not None:
+        asyncio.create_task(_ingestion_loop())
+        logger.info("Weather ingestion background loop started")
 
 
 def _cleanup_stale_caches():
@@ -5883,6 +5921,510 @@ async def get_weather_freshness():
         "color": color,
         **(freshness if isinstance(freshness, dict) else {"raw": freshness}),
     }
+
+
+# ============================================================================
+# Engine Log Ingestion
+# ============================================================================
+
+from api.database import get_db, get_db_context
+from api.models import EngineLogEntry, VesselSpec
+from src.database.engine_log_parser import EngineLogParser
+
+
+# ============================================================================
+# Vessel Specs DB Persistence
+# ============================================================================
+
+def _save_vessel_specs_to_db(specs_dict: dict) -> None:
+    """Persist vessel specs to the vessel_specs table (upsert by name='default')."""
+    with get_db_context() as db:
+        row = db.query(VesselSpec).filter(VesselSpec.name == "default").first()
+        vals = {
+            "name": "default",
+            "length": specs_dict.get("loa", 183.0),
+            "beam": specs_dict.get("beam", 32.0),
+            "draft": specs_dict.get("draft_laden", 11.8),
+            "deadweight": specs_dict.get("dwt", 49000.0),
+            "displacement": specs_dict.get("dwt", 49000.0) * 1.33,
+            "block_coefficient": 0.82,
+            "engine_power": specs_dict.get("mcr_kw", 6600.0),
+            "service_speed": specs_dict.get("service_speed_laden", 13.0),
+            "max_speed": specs_dict.get("service_speed_laden", 13.0) + 2.0,
+        }
+        extra = {
+            "draft_ballast": specs_dict.get("draft_ballast"),
+            "sfoc_at_mcr": specs_dict.get("sfoc_at_mcr"),
+            "service_speed_ballast": specs_dict.get("service_speed_ballast"),
+        }
+        if row is None:
+            row = VesselSpec(**vals, extra_metadata=extra)
+            db.add(row)
+        else:
+            for k, v in vals.items():
+                if k != "name":
+                    setattr(row, k, v)
+            row.extra_metadata = extra
+            row.updated_at = datetime.utcnow()
+        logger.info("Vessel specs persisted to DB (name='default')")
+
+
+def _load_vessel_specs_from_db() -> Optional[dict]:
+    """Load vessel specs from DB. Returns dict for VesselSpecs() or None."""
+    with get_db_context() as db:
+        row = db.query(VesselSpec).filter(VesselSpec.name == "default").first()
+        if row is None:
+            return None
+        extra = row.extra_metadata or {}
+        return {
+            "loa": row.length,
+            "beam": row.beam,
+            "draft_laden": row.draft,
+            "dwt": row.deadweight,
+            "mcr_kw": row.engine_power,
+            "service_speed_laden": row.service_speed,
+            "draft_ballast": extra.get("draft_ballast", 6.5),
+            "sfoc_at_mcr": extra.get("sfoc_at_mcr", 171.0),
+            "service_speed_ballast": extra.get("service_speed_ballast", 13.0),
+        }
+
+
+class EngineLogUploadResponse(BaseModel):
+    """Response from engine log upload."""
+    status: str
+    batch_id: str
+    imported: int
+    skipped: int
+    date_range: Optional[Dict] = None
+    events_summary: Optional[Dict[str, int]] = None
+
+
+class EngineLogEntryResponse(BaseModel):
+    """Serialized engine log entry."""
+    id: str
+    timestamp: datetime
+    lapse_hours: Optional[float] = None
+    place: Optional[str] = None
+    event: Optional[str] = None
+    rpm: Optional[float] = None
+    engine_distance: Optional[float] = None
+    speed_stw: Optional[float] = None
+    me_power_kw: Optional[float] = None
+    me_load_pct: Optional[float] = None
+    me_fuel_index_pct: Optional[float] = None
+    shaft_power: Optional[float] = None
+    shaft_torque_knm: Optional[float] = None
+    slip_pct: Optional[float] = None
+    hfo_me_mt: Optional[float] = None
+    hfo_ae_mt: Optional[float] = None
+    hfo_boiler_mt: Optional[float] = None
+    hfo_total_mt: Optional[float] = None
+    mgo_me_mt: Optional[float] = None
+    mgo_ae_mt: Optional[float] = None
+    mgo_total_mt: Optional[float] = None
+    methanol_me_mt: Optional[float] = None
+    rob_vlsfo_mt: Optional[float] = None
+    rob_mgo_mt: Optional[float] = None
+    rob_methanol_mt: Optional[float] = None
+    rh_me: Optional[float] = None
+    rh_ae_total: Optional[float] = None
+    tc_rpm: Optional[float] = None
+    scav_air_press_bar: Optional[float] = None
+    fuel_temp_c: Optional[float] = None
+    sw_temp_c: Optional[float] = None
+    upload_batch_id: str
+    source_sheet: Optional[str] = None
+    source_file: Optional[str] = None
+    extended_data: Optional[Dict] = None
+
+    class Config:
+        from_attributes = True
+
+
+class EngineLogSummaryResponse(BaseModel):
+    """Aggregated engine log summary."""
+    total_entries: int
+    date_range: Optional[Dict] = None
+    events_breakdown: Optional[Dict[str, int]] = None
+    fuel_summary: Optional[Dict] = None
+    avg_rpm_at_sea: Optional[float] = None
+    avg_speed_stw: Optional[float] = None
+    batches: Optional[List[Dict]] = None
+
+
+MAX_EXCEL_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
+
+
+@app.post("/api/engine-log/upload", response_model=EngineLogUploadResponse, tags=["Engine Log"])
+@limiter.limit("10/minute")
+async def upload_engine_log(
+    request: Request,
+    file: UploadFile = File(...),
+    vessel_id: Optional[str] = Query(None, description="Vessel UUID to link entries"),
+    sheet_name: Optional[str] = Query(None, description="Sheet name (default: E log)"),
+    api_key=Depends(get_api_key),
+    db=Depends(get_db),
+):
+    """Upload and parse an engine log Excel workbook."""
+    import tempfile
+    import uuid as uuid_mod
+
+    content = await file.read()
+    if len(content) > MAX_EXCEL_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"File too large. Maximum: {MAX_EXCEL_UPLOAD_BYTES // (1024 * 1024)} MB")
+    if len(content) == 0:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    suffix = ".xlsx"
+    if file.filename:
+        suffix = Path(file.filename).suffix or ".xlsx"
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(content)
+        tmp_path = Path(tmp.name)
+
+    try:
+        parser = EngineLogParser(tmp_path)
+        entries = parser.parse(sheet_name=sheet_name)
+    except (ValueError, FileNotFoundError) as e:
+        tmp_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        tmp_path.unlink(missing_ok=True)
+        logger.error(f"Engine log parse error: {e}", exc_info=True)
+        raise HTTPException(status_code=400, detail=f"Parse error: {e}")
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    if not entries:
+        raise HTTPException(status_code=400, detail="No valid entries found in file")
+
+    batch_id = uuid_mod.uuid4()
+    vessel_uuid = uuid_mod.UUID(vessel_id) if vessel_id else None
+
+    db_entries = []
+    for entry in entries:
+        db_entry = EngineLogEntry(
+            vessel_id=vessel_uuid,
+            timestamp=entry["timestamp"],
+            lapse_hours=entry.get("lapse_hours"),
+            place=entry.get("place"),
+            event=entry.get("event"),
+            rpm=entry.get("rpm"),
+            engine_distance=entry.get("engine_distance"),
+            speed_stw=entry.get("speed_stw"),
+            me_power_kw=entry.get("me_power_kw"),
+            me_load_pct=entry.get("me_load_pct"),
+            me_fuel_index_pct=entry.get("me_fuel_index_pct"),
+            shaft_power=entry.get("shaft_power"),
+            shaft_torque_knm=entry.get("shaft_torque_knm"),
+            slip_pct=entry.get("slip_pct"),
+            hfo_me_mt=entry.get("hfo_me_mt"),
+            hfo_ae_mt=entry.get("hfo_ae_mt"),
+            hfo_boiler_mt=entry.get("hfo_boiler_mt"),
+            hfo_total_mt=entry.get("hfo_total_mt"),
+            mgo_me_mt=entry.get("mgo_me_mt"),
+            mgo_ae_mt=entry.get("mgo_ae_mt"),
+            mgo_total_mt=entry.get("mgo_total_mt"),
+            methanol_me_mt=entry.get("methanol_me_mt"),
+            rob_vlsfo_mt=entry.get("rob_vlsfo_mt"),
+            rob_mgo_mt=entry.get("rob_mgo_mt"),
+            rob_methanol_mt=entry.get("rob_methanol_mt"),
+            rh_me=entry.get("rh_me"),
+            rh_ae_total=entry.get("rh_ae_total"),
+            tc_rpm=entry.get("tc_rpm"),
+            scav_air_press_bar=entry.get("scav_air_press_bar"),
+            fuel_temp_c=entry.get("fuel_temp_c"),
+            sw_temp_c=entry.get("sw_temp_c"),
+            upload_batch_id=batch_id,
+            source_sheet=entry.get("source_sheet"),
+            source_file=file.filename or entry.get("source_file"),
+            extended_data=entry.get("extended_data"),
+        )
+        db_entries.append(db_entry)
+
+    db.add_all(db_entries)
+    db.commit()
+
+    stats = parser.get_statistics()
+
+    return EngineLogUploadResponse(
+        status="success",
+        batch_id=str(batch_id),
+        imported=len(db_entries),
+        skipped=0,
+        date_range=stats.get("date_range"),
+        events_summary=stats.get("events_breakdown"),
+    )
+
+
+@app.get("/api/engine-log/entries", response_model=List[EngineLogEntryResponse], tags=["Engine Log"])
+async def get_engine_log_entries(
+    event: Optional[str] = Query(None, description="Filter by event type"),
+    date_from: Optional[datetime] = Query(None, description="Start date"),
+    date_to: Optional[datetime] = Query(None, description="End date"),
+    min_rpm: Optional[float] = Query(None, ge=0, description="Minimum RPM"),
+    batch_id: Optional[str] = Query(None, description="Filter by batch UUID"),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    db=Depends(get_db),
+):
+    """Query engine log entries with optional filters and pagination."""
+    import uuid as uuid_mod
+
+    query = db.query(EngineLogEntry)
+    if event:
+        query = query.filter(EngineLogEntry.event == event.upper())
+    if date_from:
+        query = query.filter(EngineLogEntry.timestamp >= date_from)
+    if date_to:
+        query = query.filter(EngineLogEntry.timestamp <= date_to)
+    if min_rpm is not None:
+        query = query.filter(EngineLogEntry.rpm >= min_rpm)
+    if batch_id:
+        query = query.filter(EngineLogEntry.upload_batch_id == uuid_mod.UUID(batch_id))
+
+    entries = query.order_by(EngineLogEntry.timestamp).offset(offset).limit(limit).all()
+
+    return [
+        EngineLogEntryResponse(
+            id=str(e.id), timestamp=e.timestamp, lapse_hours=e.lapse_hours,
+            place=e.place, event=e.event, rpm=e.rpm, engine_distance=e.engine_distance,
+            speed_stw=e.speed_stw, me_power_kw=e.me_power_kw, me_load_pct=e.me_load_pct,
+            me_fuel_index_pct=e.me_fuel_index_pct, shaft_power=e.shaft_power,
+            shaft_torque_knm=e.shaft_torque_knm, slip_pct=e.slip_pct,
+            hfo_me_mt=e.hfo_me_mt, hfo_ae_mt=e.hfo_ae_mt, hfo_boiler_mt=e.hfo_boiler_mt,
+            hfo_total_mt=e.hfo_total_mt, mgo_me_mt=e.mgo_me_mt, mgo_ae_mt=e.mgo_ae_mt,
+            mgo_total_mt=e.mgo_total_mt, methanol_me_mt=e.methanol_me_mt,
+            rob_vlsfo_mt=e.rob_vlsfo_mt, rob_mgo_mt=e.rob_mgo_mt,
+            rob_methanol_mt=e.rob_methanol_mt, rh_me=e.rh_me, rh_ae_total=e.rh_ae_total,
+            tc_rpm=e.tc_rpm, scav_air_press_bar=e.scav_air_press_bar,
+            fuel_temp_c=e.fuel_temp_c, sw_temp_c=e.sw_temp_c,
+            upload_batch_id=str(e.upload_batch_id), source_sheet=e.source_sheet,
+            source_file=e.source_file, extended_data=e.extended_data,
+        )
+        for e in entries
+    ]
+
+
+@app.get("/api/engine-log/summary", response_model=EngineLogSummaryResponse, tags=["Engine Log"])
+async def get_engine_log_summary(
+    batch_id: Optional[str] = Query(None, description="Filter by batch UUID"),
+    db=Depends(get_db),
+):
+    """Get aggregated summary statistics from engine log entries."""
+    import uuid as uuid_mod
+    from sqlalchemy import func
+
+    query = db.query(EngineLogEntry)
+    if batch_id:
+        query = query.filter(EngineLogEntry.upload_batch_id == uuid_mod.UUID(batch_id))
+
+    total = query.count()
+    if total == 0:
+        return EngineLogSummaryResponse(total_entries=0)
+
+    date_q = db.query(func.min(EngineLogEntry.timestamp), func.max(EngineLogEntry.timestamp))
+    if batch_id:
+        date_q = date_q.filter(EngineLogEntry.upload_batch_id == uuid_mod.UUID(batch_id))
+    min_ts, max_ts = date_q.one()
+
+    event_q = db.query(EngineLogEntry.event, func.count(EngineLogEntry.id)).group_by(EngineLogEntry.event)
+    if batch_id:
+        event_q = event_q.filter(EngineLogEntry.upload_batch_id == uuid_mod.UUID(batch_id))
+    events_breakdown = {ev or "UNKNOWN": cnt for ev, cnt in event_q.all()}
+
+    fuel_q = db.query(func.sum(EngineLogEntry.hfo_total_mt), func.sum(EngineLogEntry.mgo_total_mt), func.sum(EngineLogEntry.methanol_me_mt))
+    if batch_id:
+        fuel_q = fuel_q.filter(EngineLogEntry.upload_batch_id == uuid_mod.UUID(batch_id))
+    hfo_sum, mgo_sum, meth_sum = fuel_q.one()
+
+    rpm_q = db.query(func.avg(EngineLogEntry.rpm)).filter(EngineLogEntry.event == "NOON", EngineLogEntry.rpm > 0)
+    if batch_id:
+        rpm_q = rpm_q.filter(EngineLogEntry.upload_batch_id == uuid_mod.UUID(batch_id))
+    avg_rpm = rpm_q.scalar()
+
+    spd_q = db.query(func.avg(EngineLogEntry.speed_stw)).filter(EngineLogEntry.event == "NOON", EngineLogEntry.speed_stw > 0)
+    if batch_id:
+        spd_q = spd_q.filter(EngineLogEntry.upload_batch_id == uuid_mod.UUID(batch_id))
+    avg_speed = spd_q.scalar()
+
+    batch_q = db.query(
+        EngineLogEntry.upload_batch_id, func.count(EngineLogEntry.id),
+        func.min(EngineLogEntry.timestamp), func.max(EngineLogEntry.timestamp),
+        func.min(EngineLogEntry.source_file),
+    ).group_by(EngineLogEntry.upload_batch_id)
+    batches = [
+        {"batch_id": str(bid), "count": cnt,
+         "date_start": ds.isoformat() if ds else None,
+         "date_end": de.isoformat() if de else None, "source_file": sf}
+        for bid, cnt, ds, de, sf in batch_q.all()
+    ]
+
+    return EngineLogSummaryResponse(
+        total_entries=total,
+        date_range={"start": min_ts.isoformat() if min_ts else None, "end": max_ts.isoformat() if max_ts else None},
+        events_breakdown=events_breakdown,
+        fuel_summary={"hfo_mt": round(float(hfo_sum or 0), 3), "mgo_mt": round(float(mgo_sum or 0), 3), "methanol_mt": round(float(meth_sum or 0), 3)},
+        avg_rpm_at_sea=round(float(avg_rpm), 1) if avg_rpm else None,
+        avg_speed_stw=round(float(avg_speed), 2) if avg_speed else None,
+        batches=batches,
+    )
+
+
+@app.delete("/api/engine-log/batch/{batch_id}", tags=["Engine Log"])
+@limiter.limit(get_rate_limit_string())
+async def delete_engine_log_batch(
+    request: Request,
+    batch_id: str,
+    api_key=Depends(get_api_key),
+    db=Depends(get_db),
+):
+    """Delete all engine log entries for a given upload batch."""
+    import uuid as uuid_mod
+
+    try:
+        bid = uuid_mod.UUID(batch_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid batch_id UUID format")
+
+    count = db.query(EngineLogEntry).filter(EngineLogEntry.upload_batch_id == bid).delete()
+    db.commit()
+
+    if count == 0:
+        raise HTTPException(status_code=404, detail=f"No entries found for batch {batch_id}")
+
+    return {"status": "deleted", "batch_id": batch_id, "deleted_count": count}
+
+
+# ============================================================================
+# Engine Log → Calibration Bridge
+# ============================================================================
+
+class EngineLogCalibrateResponse(BaseModel):
+    """Response from engine-log-based calibration."""
+    status: str
+    factors: CalibrationFactorsModel
+    entries_used: int
+    entries_skipped: int
+    mean_error_before_mt: float
+    mean_error_after_mt: float
+    improvement_pct: float
+
+
+@app.post("/api/engine-log/calibrate", response_model=EngineLogCalibrateResponse, tags=["Engine Log"])
+@limiter.limit("5/minute")
+async def calibrate_from_engine_log(
+    request: Request,
+    batch_id: Optional[str] = Query(None, description="Filter to specific upload batch"),
+    days_since_drydock: int = Query(0, ge=0, description="Days since last dry dock"),
+    api_key=Depends(get_api_key),
+    db=Depends(get_db),
+):
+    """
+    Calibrate vessel model from engine log NOON entries.
+
+    Converts NOON entries (speed, fuel, power, RPM) into NoonReport objects,
+    feeds them to VesselCalibrator.calibrate(), and applies the resulting
+    factors to the vessel model.
+    """
+    global vessel_calibrator, current_calibration
+    global current_vessel_model, voyage_calculator, route_optimizer, visir_optimizer
+
+    import uuid as uuid_mod
+
+    # Query NOON entries
+    query = db.query(EngineLogEntry).filter(EngineLogEntry.event == "NOON")
+    if batch_id:
+        try:
+            bid = uuid_mod.UUID(batch_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid batch_id UUID format")
+        query = query.filter(EngineLogEntry.upload_batch_id == bid)
+
+    noon_rows = query.order_by(EngineLogEntry.timestamp).all()
+
+    # Convert to NoonReport objects, skipping invalid entries
+    noon_reports: List[NoonReport] = []
+    skipped = 0
+    for row in noon_rows:
+        speed = row.speed_stw
+        hfo = row.hfo_total_mt or 0.0
+        mgo = row.mgo_total_mt or 0.0
+        fuel = hfo + mgo
+
+        # Skip entries with no speed or no fuel
+        if not speed or speed <= 0 or fuel <= 0:
+            skipped += 1
+            continue
+
+        noon_reports.append(NoonReport(
+            timestamp=row.timestamp,
+            latitude=0.0,
+            longitude=0.0,
+            speed_over_ground_kts=speed,
+            speed_through_water_kts=speed,
+            fuel_consumption_mt=fuel,
+            period_hours=row.lapse_hours if row.lapse_hours and row.lapse_hours > 0 else 24.0,
+            is_laden=True,
+            engine_power_kw=row.me_power_kw,
+            engine_rpm=row.rpm,
+        ))
+
+    if len(noon_reports) < VesselCalibrator.MIN_REPORTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Need at least {VesselCalibrator.MIN_REPORTS} valid NOON entries for calibration. "
+                   f"Found {len(noon_reports)} valid, {skipped} skipped."
+        )
+
+    try:
+        # Feed reports to calibrator and run
+        vessel_calibrator.noon_reports = noon_reports
+        result = vessel_calibrator.calibrate(days_since_drydock=days_since_drydock)
+
+        # Store calibration
+        current_calibration = result.factors
+
+        # Apply to vessel model (same pattern as POST /api/vessel/calibrate)
+        current_vessel_model = VesselModel(
+            specs=current_vessel_specs,
+            calibration_factors={
+                'calm_water': current_calibration.calm_water,
+                'wind': current_calibration.wind,
+                'waves': current_calibration.waves,
+            }
+        )
+        voyage_calculator = VoyageCalculator(vessel_model=current_vessel_model)
+        route_optimizer = RouteOptimizer(vessel_model=current_vessel_model)
+        visir_optimizer = VisirOptimizer(vessel_model=current_vessel_model)
+
+        vessel_calibrator.save_calibration("default", current_calibration)
+
+        return EngineLogCalibrateResponse(
+            status="calibrated",
+            factors=CalibrationFactorsModel(
+                calm_water=result.factors.calm_water,
+                wind=result.factors.wind,
+                waves=result.factors.waves,
+                sfoc_factor=result.factors.sfoc_factor,
+                calibrated_at=result.factors.calibrated_at,
+                num_reports_used=result.factors.num_reports_used,
+                calibration_error=result.factors.calibration_error,
+                days_since_drydock=result.factors.days_since_drydock,
+            ),
+            entries_used=result.reports_used,
+            entries_skipped=skipped,
+            mean_error_before_mt=result.mean_error_before,
+            mean_error_after_mt=result.mean_error_after,
+            improvement_pct=result.improvement_pct,
+        )
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Engine log calibration failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Calibration failed: {str(e)}")
 
 
 # ============================================================================
