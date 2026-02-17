@@ -7,17 +7,26 @@ A maritime route optimization platform for Medium Range (MR) Product Tankers. Mi
 ## Features
 
 ### Vessel Performance Modeling
-- Holtrop-Mennen resistance prediction (calm water, wind, waves)
-- SFOC curves at variable engine loads
-- Hull fouling calibration from operational noon reports
-- Laden and ballast condition support
-- Configurable vessel specifications (default: 49,000 DWT MR tanker)
+- **Holtrop-Mennen resistance prediction** — calm water resistance with frictional, wave-making, and appendage components
+- **Two wave resistance methods** — STAWAVE-1 (ISO 15016, default) and Kwon's method (speed-loss percentage, per TN001)
+- **SFOC curves** at variable engine loads with calibration factor support
+- **Performance predictor** — dual-mode inverse solver: find achievable speed at a given engine load, or find required power for a target calm-water speed in weather
+- Hull fouling calibration from operational noon reports and engine log data
+- Laden and ballast condition support with 20 configurable vessel parameters
+- Vessel specifications persisted in PostgreSQL across restarts
+
+### Engine Log Analytics
+- **Engine log ingestion** — upload CSV/Excel operational data with automatic column mapping
+- **Performance dashboard** — 5 KPIs (avg speed, avg fuel, efficiency, distance, operating hours) + 6 interactive engine charts
+- **Analytics tab** — fuel consumption distributions, speed-power scatter, voyage statistics
+- **Engine-log calibration bridge** — calibrate vessel model directly from engine log data
+- **Batch management** — upload, browse, filter, and delete engine log batches
 
 ### Route Optimization
 - **Dual-engine optimization**: A\* grid search + VISIR-style Dijkstra with time-expanded graph
-- All 6 route variants computed per request (2 engines × 3 safety weights: fuel / balanced / safety)
+- All 6 route variants computed per request (2 engines x 3 safety weights: fuel / balanced / safety)
 - Sequential execution with progressive UI updates as each route completes
-- A\* grid at 0.2° (~12nm) resolution; VISIR at 0.25° (~15nm) — aligned with professional routing software (VISIR-2, StormGeo)
+- A\* grid at 0.2 deg (~12nm) resolution; VISIR at 0.25 deg (~15nm) — aligned with professional routing software (VISIR-2, StormGeo)
 - Distance-adaptive land mask sampling (~1 check per 2nm, auto-scaled per segment length)
 - Per-edge land crossing checks on both engines using `global-land-mask` (1km resolution)
 - Voluntary speed reduction (VSR) in heavy weather (VISIR engine)
@@ -27,8 +36,8 @@ A maritime route optimization platform for Medium Range (MR) Product Tankers. Mi
 - RTZ file import/export (IEC 61174 ECDIS standard)
 
 ### Weather Integration
-- NOAA GFS (0.25°) for near-real-time wind fields via NOMADS GRIB filter
-- 5-day wind forecast timeline (f000–f120, 3-hourly steps) with Windy-style animation
+- NOAA GFS (0.25 deg) for near-real-time wind fields via NOMADS GRIB filter
+- 5-day wind forecast timeline (f000-f120, 3-hourly steps) with Windy-style animation
 - Copernicus Marine Service (CMEMS) for wave and ocean current data
 - ERA5 reanalysis as secondary wind fallback (~5-day lag)
 - Climatology fallback for beyond-forecast-horizon voyages
@@ -36,16 +45,16 @@ A maritime route optimization platform for Medium Range (MR) Product Tankers. Mi
 - **Pre-ingested weather database** — grids compressed (zlib/float32) in PostgreSQL, served in milliseconds
 - **Redis shared cache** across all API workers (replaces per-worker in-memory dict)
 - User-triggered overlay model — no background loops; per-layer resync with viewport-aware CMEMS downloads
-- Server-side grid subsampling (≤500 pts/axis) prevents browser OOM on large viewports
+- Server-side grid subsampling (<=500 pts/axis) prevents browser OOM on large viewports
 - Synthetic data generator for testing and demos
 
 ### Monte Carlo Simulation
 - Parametric Monte Carlo with temporally correlated perturbations
 - Divides voyage into up to 100 time slices (~1 per 1.2 hours)
 - Cholesky decomposition of exponential temporal correlation matrix
-- Log-normal perturbation model: wind σ=0.35, wave σ=0.20 (70% correlated with wind), current σ=0.15
+- Log-normal perturbation model: wind sigma=0.35, wave sigma=0.20 (70% correlated with wind), current sigma=0.15
 - P10/P50/P90 confidence intervals for ETA, fuel consumption, and voyage time
-- Pre-fetches multi-timestep wave forecast grids from database (0–120h)
+- Pre-fetches multi-timestep wave forecast grids from database (0-120h)
 - 100 simulations complete in <500ms
 
 ### Regulatory Compliance
@@ -72,7 +81,8 @@ A maritime route optimization platform for Medium Range (MR) Product Tankers. Mi
 - Sequential optimization with progressive map updates (routes appear one by one)
 - Navigation persistence — waypoints, route name, and optimization results survive page navigation via React Context
 - Voyage calculation with per-leg fuel, speed, and ETA breakdown
-- Consolidated vessel configuration, calibration, and fuel analysis page (CSV + Excel upload)
+- Consolidated vessel configuration, calibration, fuel analysis, and performance prediction page
+- Engine log upload, entries browser, and analytics dashboard
 - CII compliance tracking and projections
 - Dark maritime theme, responsive design
 
@@ -81,32 +91,32 @@ A maritime route optimization platform for Medium Range (MR) Product Tankers. Mi
 ```
 windmar/
 ├── api/                        # FastAPI backend
-│   ├── main.py                 # API endpoints, weather ingestion loop, DB provider chain
+│   ├── main.py                 # API endpoints (~6500 lines), weather pipeline, vessel model
 │   ├── auth.py                 # API key authentication (bcrypt)
 │   ├── config.py               # API configuration (pydantic-settings)
 │   ├── middleware.py            # Security headers, structured logging, metrics
 │   ├── rate_limit.py           # Token bucket rate limiter (Redis-backed)
 │   ├── database.py             # SQLAlchemy ORM setup
-│   ├── models.py               # Database models
+│   ├── models.py               # Database models (weather, engine log, vessel specs)
 │   ├── health.py               # Health check logic
-│   ├── state.py                # Thread-safe application state
+│   ├── state.py                # Thread-safe application state (singleton)
 │   ├── cache.py                # Weather data caching (Redis shared cache)
 │   ├── resilience.py           # Circuit breakers
 │   ├── cli.py                  # CLI utilities
 │   └── live.py                 # Live sensor data API router
 ├── src/
 │   ├── optimization/
-│   │   ├── vessel_model.py     # Holtrop-Mennen fuel consumption model
+│   │   ├── vessel_model.py     # Holtrop-Mennen + Kwon resistance, SFOC, performance predictor
 │   │   ├── base_optimizer.py   # Abstract base class for route optimizers
-│   │   ├── route_optimizer.py  # A* grid search with weather costs (0.2°)
-│   │   ├── visir_optimizer.py  # VISIR-style Dijkstra time-expanded graph (0.25°)
+│   │   ├── route_optimizer.py  # A* grid search with weather costs (0.2 deg)
+│   │   ├── visir_optimizer.py  # VISIR-style Dijkstra time-expanded graph (0.25 deg)
 │   │   ├── router.py           # Engine dispatcher (A*/VISIR selection)
 │   │   ├── voyage.py           # Per-leg voyage calculator (LegWeather, VoyageResult)
 │   │   ├── monte_carlo.py      # Temporal MC simulation with Cholesky correlation
 │   │   ├── grid_weather_provider.py  # Bilinear interpolation from pre-fetched grids
 │   │   ├── temporal_weather_provider.py  # Trilinear interpolation (lat, lon, time)
 │   │   ├── weather_assessment.py  # Route weather assessment + DB provisioning
-│   │   ├── vessel_calibration.py  # Noon report calibration (scipy)
+│   │   ├── vessel_calibration.py  # Noon report + engine log calibration (scipy)
 │   │   └── seakeeping.py       # Ship motion safety assessment
 │   ├── data/
 │   │   ├── copernicus.py       # GFS, ERA5, CMEMS providers + forecast prefetch
@@ -129,7 +139,7 @@ windmar/
 │   ├── config.py               # Application configuration
 │   └── metrics.py              # Performance metrics collection
 ├── frontend/                   # Next.js 15 + TypeScript
-│   ├── app/                    # Pages (route planner, fuel analysis, vessel config, CII, live dashboard)
+│   ├── app/                    # Pages (route planner, vessel config, CII, live dashboard)
 │   ├── components/             # React components (maps, charts, weather layers, forecast timeline)
 │   └── lib/                    # API client, utilities
 ├── tests/
@@ -226,10 +236,10 @@ Windmar uses a three-tier provider chain that automatically falls back when a so
 
 | Data Type | Primary Source | Fallback | Credentials Required |
 |-----------|---------------|----------|---------------------|
-| **Wind** | NOAA GFS (0.25°, ~3.5h lag) | ERA5 reanalysis → Synthetic | None (GFS is free) |
+| **Wind** | NOAA GFS (0.25 deg, ~3.5h lag) | ERA5 reanalysis, Synthetic | None (GFS is free) |
 | **Waves** | CMEMS global wave model | Synthetic | CMEMS account |
 | **Currents** | CMEMS global physics model | Synthetic | CMEMS account |
-| **Forecast** | GFS f000–f120 (5-day, 3h steps) | — | None |
+| **Forecast** | GFS f000-f120 (5-day, 3h steps) | — | None |
 
 **Wind data works out of the box** — GFS is fetched from NOAA NOMADS without authentication. For wave and current data, you need Copernicus Marine credentials.
 
@@ -253,29 +263,34 @@ Windmar uses a three-tier provider chain that automatically falls back when a so
 
 Without these credentials, the system falls back to synthetic data automatically for waves and currents. Wind visualization always works via GFS.
 
-See the [Weather Data Documentation](https://quantcoder-fs.com/windmar/weather-data.html) for full technical details on data acquisition, GRIB processing, and the forecast timeline.
-
-See the [Monte Carlo Simulation](https://quantcoder-fs.com/windmar/monte-carlo.html) article for the mathematical framework behind the temporal perturbation model.
+See `WEATHER_PIPELINE.md` for full technical details on data acquisition, GRIB processing, and the forecast timeline.
 
 ## API Endpoints
 
 ### Weather
+- `GET /api/weather/health` - Weather subsystem health
 - `GET /api/weather/wind` - Wind field grid (U/V components)
 - `GET /api/weather/wind/velocity` - Wind in leaflet-velocity format (GFS)
 - `GET /api/weather/waves` - Wave height field (CMEMS)
+- `GET /api/weather/swell` - Swell field
 - `GET /api/weather/currents` - Ocean current field (CMEMS)
 - `GET /api/weather/currents/velocity` - Currents in leaflet-velocity format
+- `GET /api/weather/sst` - Sea surface temperature
+- `GET /api/weather/visibility` - Visibility field
+- `GET /api/weather/ice` - Sea ice concentration
 - `GET /api/weather/point` - Weather at specific coordinates
+- `GET /api/weather/freshness` - Weather data age indicator
+- `POST /api/weather/{layer}/resync` - Per-layer viewport-aware resync
 
 ### Forecast (Wind)
 - `GET /api/weather/forecast/status` - GFS prefetch progress and run info
-- `POST /api/weather/forecast/prefetch` - Trigger 5-day forecast download (f000–f120)
+- `POST /api/weather/forecast/prefetch` - Trigger 5-day forecast download (f000-f120)
 - `GET /api/weather/forecast/frames` - Bulk download all forecast frames
 
-### Forecast (Wave)
-- `GET /api/weather/forecast/wave/status` - Wave forecast prefetch progress
-- `POST /api/weather/forecast/wave/prefetch` - Trigger wave forecast download
-- `GET /api/weather/forecast/wave/frames` - Bulk download wave forecast frames
+### Forecast (Wave / Current / Ice / SST / Visibility)
+- `GET /api/weather/forecast/{layer}/status` - Prefetch progress
+- `POST /api/weather/forecast/{layer}/prefetch` - Trigger forecast download
+- `GET /api/weather/forecast/{layer}/frames` - Bulk download forecast frames
 
 ### Routes
 - `POST /api/routes/parse-rtz` - Parse RTZ route file
@@ -284,31 +299,34 @@ See the [Monte Carlo Simulation](https://quantcoder-fs.com/windmar/monte-carlo.h
 ### Voyage
 - `POST /api/voyage/calculate` - Full voyage calculation with weather
 - `GET /api/voyage/weather-along-route` - Weather conditions per waypoint
-
-### Monte Carlo
 - `POST /api/voyage/monte-carlo` - Parametric MC simulation (P10/P50/P90)
 
 ### Optimization
-- `POST /api/optimize/route` - Weather-optimal route finding (A\* or VISIR engine, selectable via `engine` param)
+- `POST /api/optimize/route` - Weather-optimal route finding (A\* or VISIR engine)
 - `GET /api/optimize/status` - Optimizer configuration and available targets
-
-### Weather Ingestion
-- `POST /api/weather/ingest` - Trigger immediate weather ingestion cycle
-- `GET /api/weather/ingest/status` - Latest ingestion run info and grid counts
-- `GET /api/weather/freshness` - Weather data age indicator
 
 ### Vessel
 - `GET /api/vessel/specs` - Current vessel specifications
-- `POST /api/vessel/specs` - Update vessel specifications
+- `POST /api/vessel/specs` - Update vessel specifications (persisted to DB)
 - `GET /api/vessel/calibration` - Current calibration factors
 - `POST /api/vessel/calibration/set` - Manually set calibration factors
 - `POST /api/vessel/calibrate` - Run calibration from noon reports
 - `POST /api/vessel/calibration/estimate-fouling` - Estimate hull fouling factor
+- `GET /api/vessel/model-status` - Full model parameters, calibration state, computed values
+- `GET /api/vessel/fuel-scenarios` - Physics-based fuel scenarios (4 conditions)
+- `POST /api/vessel/predict` - Performance predictor (engine load or target speed mode)
 - `GET /api/vessel/noon-reports` - List uploaded noon reports
 - `POST /api/vessel/noon-reports` - Add a single noon report
 - `POST /api/vessel/noon-reports/upload-csv` - Upload operational data (CSV)
 - `POST /api/vessel/noon-reports/upload-excel` - Upload operational data (Excel .xlsx/.xls)
 - `DELETE /api/vessel/noon-reports` - Clear all noon reports
+
+### Engine Log
+- `POST /api/engine-log/upload` - Upload engine log CSV/Excel
+- `GET /api/engine-log/entries` - Browse entries with pagination and filters
+- `GET /api/engine-log/summary` - Aggregate statistics per batch
+- `POST /api/engine-log/calibrate` - Calibrate vessel model from engine log data
+- `DELETE /api/engine-log/batch/{batch_id}` - Delete a batch
 
 ### Zones
 - `GET /api/zones` - All regulatory zones (GeoJSON)
@@ -359,32 +377,59 @@ pytest tests/unit/test_vessel_model.py -v    # Specific test file
 
 ## Default Vessel
 
-The system ships with a default MR Product Tanker configuration:
+The system ships with a default MR Product Tanker configuration (all values configurable via API and persisted in DB):
 
 | Parameter | Value |
 |-----------|-------|
 | DWT | 49,000 MT |
-| LOA / Beam | 183m / 32m |
+| LOA / LPP | 183m / 176m |
+| Beam | 32m |
 | Draft (laden / ballast) | 11.8m / 6.5m |
-| Main Engine | 8,840 kW |
+| Displacement (laden / ballast) | 65,000 / 20,000 MT |
+| Block coefficient (laden / ballast) | 0.82 / 0.75 |
+| Wetted surface (laden / ballast) | 7,500 / 5,200 m2 |
+| Main Engine MCR | 8,840 kW |
 | SFOC at MCR | 171 g/kWh |
 | Service Speed (laden / ballast) | 14.5 / 15.0 knots |
+| Frontal area (laden / ballast) | 450 / 850 m2 |
+| Lateral area (laden / ballast) | 2,100 / 2,800 m2 |
 
 ## Changelog
 
-### v0.0.8 — Weather Pipeline Refactoring
+### v0.0.8 — Vessel Model Upgrade, Engine Log Analytics, Weather Pipeline
 
-Major refactoring of the weather data pipeline: viewport-aware resync, overlay grid subsampling, and comprehensive documentation.
+Engine log ingestion and analytics, physics model upgrade (SFOC fix, Kwon's wave resistance, performance predictor), and weather pipeline refactoring.
+
+**Vessel Model Physics**
+
+- **SFOC calibration factor fix** — `sfoc_factor` was calibrated but never applied to the SFOC curve; now propagated through `VesselModel`, `state.py`, and all model rebuild paths in the API
+- **Kwon's wave resistance method** — alternative to STAWAVE-1, selectable via `wave_method` parameter (`'stawave1'` | `'kwon'`); uses speed-loss percentage from Hs, Cb, Lpp, and directional factor (per TN001)
+- **Performance predictor** — bisection solver for the inverse problem: given engine load + weather, what speed is achievable? Returns STW, SOG, fuel/day, fuel/nm, resistance breakdown, weather speed loss
+- **Dual-mode prediction** — `POST /api/vessel/predict` accepts either `engine_load_pct` (find speed at power) or `calm_speed_kts` (find power for target speed); MCR capping with automatic fallback
+- **Relative direction convention** — all predictor directions are relative to bow (0 deg = ahead, 90 deg = beam, 180 deg = astern) instead of absolute compass headings
+- **Full model status endpoint** — `GET /api/vessel/model-status` exposes all 20 VesselSpecs fields, calibration state, and computed optimal speeds
+- **Physics-based fuel scenarios** — `GET /api/vessel/fuel-scenarios` replaces hardcoded frontend scenarios with real `VesselModel.calculate_fuel_consumption()` results
+
+**Engine Log Analytics**
+
+- **Engine log ingestion** — upload CSV/Excel with automatic column mapping, parser handles multiple date formats and unit conversions
+- **Engine log DB model** — batch + entries tables with indexes on timestamp, batch_id
+- **Entries browser** — paginated entries with shared filters across Entries, Analytics, and Performance tabs
+- **Analytics dashboard** — 5 KPIs (avg speed, avg fuel, efficiency, total distance, operating hours) + 6 interactive Recharts charts (speed-power scatter, fuel distribution, SFOC profile, voyage timeline)
+- **Performance tab** — engine performance KPIs derived from operational data
+- **Engine-log calibration bridge** — `POST /api/engine-log/calibrate` runs vessel calibration against engine log entries
+- **Vessel specs persistence** — specs saved to PostgreSQL, restored on startup
+
+**Weather Pipeline**
 
 - **User-triggered overlay model** — removed all background ingestion loops, startup health gates, and ensure-all polling; weather data loads on demand when the user activates a layer
 - **Viewport-aware resync** — per-layer `POST /api/weather/{layer}/resync` accepts the frontend's current viewport bounds, so CMEMS data is downloaded for the region the user is viewing (not a hardcoded North Atlantic bbox)
-- **CMEMS bbox cap** — resync viewport capped at 40° lat × 60° lon to prevent API container OOM (uncapped downloads at 0.083° can exceed 10 GB RAM)
-- **Overlay grid subsampling** — all CMEMS overlay endpoints (waves, swell, currents, SST, visibility) are server-side subsampled to ≤500 grid points per axis before JSON serialization, preventing browser OOM on large viewports; ice is exempt (polar-only, always under limit); wind is exempt (GFS 0.5° already coarse)
-- **Dynamic ocean mask step** — ocean/land mask resolution scales with viewport span instead of fixed 0.05° step
+- **CMEMS bbox cap** — resync viewport capped at 40 deg lat x 60 deg lon to prevent API container OOM
+- **Overlay grid subsampling** — all CMEMS overlay endpoints server-side subsampled to <=500 grid points per axis before JSON serialization
 - **Per-source isolation** — resyncing one layer never touches another; supersede and orphan cleanup scoped by `source` column
-- **Deferred supersede** — new ingestion runs only replace old ones if they have ≥ forecast hours, preventing data loss when NOMADS/CMEMS is still publishing
-- **Wind DB fallback** — when no GRIB file cache exists, wind frames are rebuilt from PostgreSQL via `_rebuild_wind_cache_from_db()`
-- **Comprehensive pipeline documentation** — `WEATHER_PIPELINE.md` rewritten with dataset sizes, memory estimates, subsampling rationale, browser limits, and architecture diagrams
+- **Deferred supersede** — new ingestion runs only replace old ones if they have >= forecast hours, preventing data loss when NOMADS/CMEMS is still publishing
+- **Wind DB fallback** — when no GRIB file cache exists, wind frames are rebuilt from PostgreSQL
+- **Comprehensive pipeline documentation** — `WEATHER_PIPELINE.md` rewritten with dataset sizes, memory estimates, subsampling rationale
 
 ### v0.0.7 — Two-Mode Architecture & 7-Layer Forecast Timeline
 
@@ -399,31 +444,28 @@ Major UI overhaul to an ECDIS-style map-centric layout, enhanced weather visuali
 - **Dual speed-strategy display** — after A\* path optimization, present two scenarios: **Same Speed** (constant speed, arrive earlier, moderate fuel savings) and **Match ETA** (slow-steam to match baseline arrival time, maximum fuel savings); strategy selector tabs in route comparison panel
 - **Voyage baseline gating** — Optimize A\* button disabled until a voyage calculation baseline is computed, ensuring meaningful fuel/time comparisons
 - **Dual-route visualization** — display original (blue) and optimized (green dashed) routes simultaneously on map with comparison table (distance, fuel, time, waypoints) and Dismiss/Apply buttons
-- **GFS wind DB ingestion** — add wind grids to the 6-hourly ingestion cycle (41 GFS forecast hours, 3h steps); supplement temporal weather with live GFS wind when DB grids are unavailable
-- **Forecast data indicator** — timeline scrubber shows data source field for forecast frames
-- **Weather forecast coverage fix** — remove CMEMS bounding-box cap so downloads cover full viewport; dynamic subsampling keeps payload size manageable; cache staleness detection triggers fresh downloads (#21)
-- **Turn-angle path smoothing** — post-filter removes waypoints with <15° course change to eliminate grid staircase artifacts from A\* output
-- **A\* optimizer tuning** — increase time penalty (λ\_time from 0.5× to 1.0× service fuel) to prevent long zigzag detours; scale smoothing tolerance to grid resolution
-- **Data consistency fixes** — fuel savings display shows amber for increases; constant-speed baseline for fair comparison; SOG-based speed loss; temporal weather wired into voyage calculator; enforce max\_time\_factor on variable speed
+- **GFS wind DB ingestion** — add wind grids to the 6-hourly ingestion cycle (41 GFS forecast hours, 3h steps)
+- **Turn-angle path smoothing** — post-filter removes waypoints with <15 deg course change to eliminate grid staircase artifacts from A\* output
+- **A\* optimizer tuning** — increase time penalty to prevent long zigzag detours; scale smoothing tolerance to grid resolution
 
 ### v0.0.5 — Weather Database Architecture
 
 Pre-ingested weather grids in PostgreSQL, eliminating live download latency during route calculations.
 
-- **Weather ingestion service** — background task downloads CMEMS wave/current and GFS wind grids every 6 hours, compresses with zlib (float32), stores in PostgreSQL (`weather_forecast_runs` + `weather_grid_data` tables)
-- **DB weather provider** — `DbWeatherProvider` reads compressed grids, crops to route bounding box, returns `WeatherData` objects compatible with `GridWeatherProvider`
-- **Multi-tier fallback chain** — Redis shared cache → DB pre-ingested → live CMEMS/GFS → synthetic
+- **Weather ingestion service** — background task downloads CMEMS wave/current and GFS wind grids every 6 hours, compresses with zlib (float32), stores in PostgreSQL
+- **DB weather provider** — reads compressed grids, crops to route bounding box, returns `WeatherData` objects compatible with `GridWeatherProvider`
+- **Multi-tier fallback chain** — Redis shared cache, DB pre-ingested, live CMEMS/GFS, synthetic
 - **Redis shared cache** — replaces per-worker in-memory dict, all 4 Uvicorn workers share weather data
 - **Frontend freshness indicator** — shows weather data age (green/yellow/red) in map overlay controls
-- **Performance**: route optimization from ~90-180s → 2-5s; voyage calculation from minutes → sub-second
+- **Performance**: route optimization from ~90-180s to 2-5s; voyage calculation from minutes to sub-second
 
 ### v0.0.4 — Frontend Refactor, Monte Carlo, Grid Weather
 
 Component architecture refactor and Monte Carlo simulation engine.
 
-- **Frontend component split** — monolithic `page.tsx` refactored into reusable components (`MapOverlayControls`, `VoyagePanel`, `AnalysisTab`, etc.)
+- **Frontend component split** — monolithic `page.tsx` refactored into reusable components
 - **Monte Carlo simulation** — N=100 parametric simulation engine with P10/P50/P90 confidence intervals for ETA, fuel, and voyage time
-- **GridWeatherProvider** — bilinear interpolation from pre-fetched weather grids (microsecond-level lookups vs. per-leg API calls), enabling 1000x faster A\* routing
+- **GridWeatherProvider** — bilinear interpolation from pre-fetched weather grids, enabling 1000x faster A\* routing
 - **Analysis tab** — persistent storage of voyage results for comparison across routes
 
 ### v0.0.3 — Real Weather Data Integration
@@ -431,16 +473,14 @@ Component architecture refactor and Monte Carlo simulation engine.
 Live connectivity to Copernicus and NOAA weather services.
 
 - **CMEMS wave and current data** — Copernicus Marine Service API integration with swell/wind-wave decomposition for accurate seakeeping
-- **GFS 5-day wind forecast timeline** — f000–f120 (3-hourly steps) with Windy-style particle animation on the map
+- **GFS 5-day wind forecast timeline** — f000-f120 (3-hourly steps) with Windy-style particle animation on the map
 - **ERA5 wind fallback** — Climate Data Store reanalysis as secondary wind source (~5-day lag)
 - **Data sources documentation** — credential setup guide, provider chain documentation
-- **Weather data page** — dedicated documentation for acquisition, GRIB processing, forecast timeline
 
 ## Branch Strategy
 
 - `main` - Stable release branch
-- `development` - Integration branch for features in progress
-- `feature/*` - Feature branches for experimental work
+- `demo` - Demo deployment branch (isolated)
 
 ## License
 
