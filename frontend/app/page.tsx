@@ -833,7 +833,7 @@ export default function HomePage() {
                 setResyncRunning(true);
                 resyncRunningRef.current = true;
                 try {
-                  await apiClient.resyncWeatherLayer(weatherLayer);
+                  await apiClient.resyncWeatherLayer(weatherLayer, viewportRef.current?.bounds);
                   // Force a unique timestamp so dataTimestamp always changes,
                   // even when the same GFS model run is re-ingested.
                   setLayerIngestedAt(new Date().toISOString());

@@ -1152,8 +1152,12 @@ export const apiClient = {
     return response.data;
   },
 
-  async resyncWeatherLayer(layer: string): Promise<{ status: string; ingested_at: string }> {
-    const response = await api.post(`/api/weather/${layer}/resync`, null, { timeout: 300000 });
+  async resyncWeatherLayer(
+    layer: string,
+    bbox?: { lat_min: number; lat_max: number; lon_min: number; lon_max: number },
+  ): Promise<{ status: string; ingested_at: string }> {
+    const params = bbox ? { params: bbox } : {};
+    const response = await api.post(`/api/weather/${layer}/resync`, null, { timeout: 300000, ...params });
     return response.data;
   },
 

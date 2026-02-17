@@ -1372,21 +1372,56 @@ _LAYER_INGEST_FN = {
 
 
 @app.post("/api/weather/{layer}/resync")
-async def api_weather_layer_resync(layer: str):
+async def api_weather_layer_resync(
+    layer: str,
+    lat_min: Optional[float] = Query(None, ge=-90, le=90),
+    lat_max: Optional[float] = Query(None, ge=-90, le=90),
+    lon_min: Optional[float] = Query(None, ge=-180, le=180),
+    lon_max: Optional[float] = Query(None, ge=-180, le=180),
+):
     """Re-ingest a single weather layer and return fresh ingested_at.
 
     Synchronous — blocks until ingestion completes (30-120s for CMEMS layers).
     Clears the layer's frame cache so the next timeline request rebuilds it.
+    When bbox params are provided, CMEMS layers use them instead of defaults.
     """
     if layer not in _LAYER_INGEST_FN:
         raise HTTPException(status_code=400, detail=f"Unknown layer: {layer}. Valid: {list(_LAYER_INGEST_FN.keys())}")
     if weather_ingestion is None:
         raise HTTPException(status_code=503, detail="Weather ingestion not configured")
 
-    logger.info(f"Per-layer resync starting: {layer}")
+    # Cap CMEMS bbox to safe max size (40° lat × 60° lon) centered on viewport
+    # to avoid OOM — 0.083° resolution × 9 params × 41 timesteps gets huge fast.
+    _CMEMS_MAX_LAT_SPAN = 40.0
+    _CMEMS_MAX_LON_SPAN = 60.0
+    has_bbox = all(v is not None for v in (lat_min, lat_max, lon_min, lon_max))
+    if has_bbox:
+        lat_center = (lat_min + lat_max) / 2
+        lon_center = (lon_min + lon_max) / 2
+        lat_half = min((lat_max - lat_min) / 2, _CMEMS_MAX_LAT_SPAN / 2)
+        lon_half = min((lon_max - lon_min) / 2, _CMEMS_MAX_LON_SPAN / 2)
+        lat_min = max(-90.0, lat_center - lat_half)
+        lat_max = min(90.0, lat_center + lat_half)
+        lon_min = max(-180.0, lon_center - lon_half)
+        lon_max = min(180.0, lon_center + lon_half)
+
+    logger.info(f"Per-layer resync starting: {layer}" + (f" bbox=[{lat_min:.1f},{lat_max:.1f}]x[{lon_min:.1f},{lon_max:.1f}]" if has_bbox else ""))
     try:
-        ingest_fn = _LAYER_INGEST_FN[layer]
-        await asyncio.to_thread(ingest_fn, weather_ingestion)
+        # CMEMS layers accept viewport bbox; GFS layers ignore it (global)
+        if has_bbox and layer in ("waves", "currents", "swell", "ice"):
+            ingest_method = {
+                "waves": weather_ingestion.ingest_waves,
+                "currents": weather_ingestion.ingest_currents,
+                "swell": weather_ingestion.ingest_waves,
+                "ice": weather_ingestion.ingest_ice,
+            }[layer]
+            await asyncio.to_thread(
+                ingest_method, True,
+                lat_min, lat_max, lon_min, lon_max,
+            )
+        else:
+            ingest_fn = _LAYER_INGEST_FN[layer]
+            await asyncio.to_thread(ingest_fn, weather_ingestion)
 
         # Supersede old runs and clean orphans — scoped to this source only
         source = _LAYER_TO_SOURCE[layer]

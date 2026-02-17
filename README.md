@@ -35,7 +35,8 @@ A maritime route optimization platform for Medium Range (MR) Product Tankers. Mi
 - Unified provider that blends forecast and climatology with smooth transitions
 - **Pre-ingested weather database** — grids compressed (zlib/float32) in PostgreSQL, served in milliseconds
 - **Redis shared cache** across all API workers (replaces per-worker in-memory dict)
-- 6-hourly background ingestion cycle (waves, currents, and wind) with DB → live → synthetic fallback chain
+- User-triggered overlay model — no background loops; per-layer resync with viewport-aware CMEMS downloads
+- Server-side grid subsampling (≤500 pts/axis) prevents browser OOM on large viewports
 - Synthetic data generator for testing and demos
 
 ### Monte Carlo Simulation
@@ -370,6 +371,24 @@ The system ships with a default MR Product Tanker configuration:
 | Service Speed (laden / ballast) | 14.5 / 15.0 knots |
 
 ## Changelog
+
+### v0.0.8 — Weather Pipeline Refactoring
+
+Major refactoring of the weather data pipeline: viewport-aware resync, overlay grid subsampling, and comprehensive documentation.
+
+- **User-triggered overlay model** — removed all background ingestion loops, startup health gates, and ensure-all polling; weather data loads on demand when the user activates a layer
+- **Viewport-aware resync** — per-layer `POST /api/weather/{layer}/resync` accepts the frontend's current viewport bounds, so CMEMS data is downloaded for the region the user is viewing (not a hardcoded North Atlantic bbox)
+- **CMEMS bbox cap** — resync viewport capped at 40° lat × 60° lon to prevent API container OOM (uncapped downloads at 0.083° can exceed 10 GB RAM)
+- **Overlay grid subsampling** — all CMEMS overlay endpoints (waves, swell, currents, SST, visibility) are server-side subsampled to ≤500 grid points per axis before JSON serialization, preventing browser OOM on large viewports; ice is exempt (polar-only, always under limit); wind is exempt (GFS 0.5° already coarse)
+- **Dynamic ocean mask step** — ocean/land mask resolution scales with viewport span instead of fixed 0.05° step
+- **Per-source isolation** — resyncing one layer never touches another; supersede and orphan cleanup scoped by `source` column
+- **Deferred supersede** — new ingestion runs only replace old ones if they have ≥ forecast hours, preventing data loss when NOMADS/CMEMS is still publishing
+- **Wind DB fallback** — when no GRIB file cache exists, wind frames are rebuilt from PostgreSQL via `_rebuild_wind_cache_from_db()`
+- **Comprehensive pipeline documentation** — `WEATHER_PIPELINE.md` rewritten with dataset sizes, memory estimates, subsampling rationale, browser limits, and architecture diagrams
+
+### v0.0.7 — Two-Mode Architecture & 7-Layer Forecast Timeline
+
+Two-mode UI (Weather Viewer + Route Analysis), 7 weather overlay layers with forecast timeline, analysis panel with passage plan detail, route management, and production infrastructure.
 
 ### v0.0.6 — ECDIS UI Redesign & Dual Speed-Strategy Optimization
 
