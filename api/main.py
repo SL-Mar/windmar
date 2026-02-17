@@ -181,7 +181,7 @@ Contact: contact@slmar.co
         },
         contact={
             "name": "WINDMAR Support",
-            "url": "https://windmar.io",
+            "url": "https://slmar.co",
             "email": "contact@slmar.co",
         },
     )
