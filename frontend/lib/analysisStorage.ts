@@ -3,7 +3,7 @@
  * Provides CRUD operations for voyage analyses.
  */
 
-import { Position, VoyageResponse } from './api';
+import { Position, VoyageResponse, OptimizedRouteKey, OptimizationResponse } from './api';
 
 export interface MonteCarloResult {
   n_simulations: number;
@@ -26,6 +26,7 @@ export interface AnalysisEntry {
   };
   result: VoyageResponse;
   monteCarlo?: MonteCarloResult;
+  optimizations?: Partial<Record<OptimizedRouteKey, OptimizationResponse>>;
 }
 
 const STORAGE_KEY = 'windmar_analyses';
@@ -105,6 +106,27 @@ export function updateAnalysisMonteCarlo(id: string, mc: MonteCarloResult): Anal
     monteCarlo: mc,
   };
 
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(analyses));
+  return analyses[index];
+}
+
+/**
+ * Update an analysis's optimization results.
+ */
+export function updateAnalysisOptimizations(
+  id: string,
+  results: Record<OptimizedRouteKey, OptimizationResponse | null>,
+): AnalysisEntry | null {
+  const analyses = getAnalyses();
+  const index = analyses.findIndex(a => a.id === id);
+  if (index === -1) return null;
+
+  const filtered: Partial<Record<OptimizedRouteKey, OptimizationResponse>> = {};
+  for (const [key, val] of Object.entries(results)) {
+    if (val) filtered[key as OptimizedRouteKey] = val;
+  }
+
+  analyses[index] = { ...analyses[index], optimizations: filtered };
   localStorage.setItem(STORAGE_KEY, JSON.stringify(analyses));
   return analyses[index];
 }

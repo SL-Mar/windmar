@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import Header from '@/components/Header';
 import MonteCarloPanel from '@/components/MonteCarloPanel';
+import ProfileCharts from '@/components/ProfileCharts';
 import { getAnalyses, AnalysisEntry } from '@/lib/analysisStorage';
 import { LegResult } from '@/lib/api';
 
@@ -245,6 +246,17 @@ function AnalysisPage() {
           <div className="mb-8 max-w-md">
             <h2 className="text-sm font-semibold text-white mb-3">Monte Carlo Simulation</h2>
             <MonteCarloPanel result={analysis.monteCarlo} />
+          </div>
+        )}
+
+        {/* ── SOG Profile & ETA Comparison ── */}
+        {analysis.optimizations && Object.keys(analysis.optimizations).length > 0 && (
+          <div className="mb-8">
+            <ProfileCharts
+              baseline={analysis.result}
+              optimizations={analysis.optimizations}
+              departureTime={analysis.result.departure_time}
+            />
           </div>
         )}
       </main>

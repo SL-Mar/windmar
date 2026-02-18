@@ -7,7 +7,7 @@ import MapOverlayControls from '@/components/MapOverlayControls';
 import AnalysisPanel from '@/components/AnalysisPanel';
 import { useVoyage } from '@/components/VoyageContext';
 import { apiClient, Position, WindFieldData, WaveFieldData, VelocityData, OptimizationResponse, CreateZoneRequest, WaveForecastFrames, IceForecastFrames, SstForecastFrames, VisForecastFrames, OptimizedRouteKey, AllOptimizationResults, EMPTY_ALL_RESULTS } from '@/lib/api';
-import { getAnalyses, saveAnalysis, deleteAnalysis, updateAnalysisMonteCarlo, AnalysisEntry } from '@/lib/analysisStorage';
+import { getAnalyses, saveAnalysis, deleteAnalysis, updateAnalysisMonteCarlo, updateAnalysisOptimizations, AnalysisEntry } from '@/lib/analysisStorage';
 import { debugLog } from '@/lib/debugLog';
 import DebugConsole from '@/components/DebugConsole';
 import { useToast } from '@/components/Toast';
@@ -645,6 +645,11 @@ export default function HomePage() {
       const dt = ((performance.now() - t0) / 1000).toFixed(1);
       const ok = Object.values(results).filter(Boolean).length;
       debugLog('info', 'ROUTE', `All-routes done in ${dt}s: ${ok}/6 succeeded`);
+
+      if (displayedAnalysisId && ok > 0) {
+        updateAnalysisOptimizations(displayedAnalysisId, results);
+        setAnalyses(getAnalyses());
+      }
     } catch (error) {
       debugLog('error', 'ROUTE', `All-routes optimization failed: ${error}`);
     } finally {
