@@ -17,9 +17,9 @@ from src.database.engine_log_parser import (
     _safe_str,
 )
 
-# Path to real GARONNE dataset (skip tests if not present)
-GARONNE_FILE = Path(
-    "/home/slmar/Desktop/Spec WindMar/01. Engine Log GARONNE- 0929.xlsx"
+# Path to real vessel dataset (skip tests if not present)
+SAMPLE_ELOG_FILE = Path(
+    "/home/slmar/Desktop/Spec WindMar/sample-engine-log.xlsx"
 )
 
 
@@ -324,11 +324,11 @@ class TestStatistics:
             path.unlink(missing_ok=True)
 
 
-@pytest.mark.skipif(not GARONNE_FILE.exists(), reason="GARONNE file not available")
-class TestGaronneDataset:
+@pytest.mark.skipif(not SAMPLE_ELOG_FILE.exists(), reason="Sample e-log file not available")
+class TestRealDataset:
     @pytest.fixture(scope="class")
     def parsed(self):
-        parser = EngineLogParser(GARONNE_FILE)
+        parser = EngineLogParser(SAMPLE_ELOG_FILE)
         entries = parser.parse()
         return parser, entries
 

@@ -43,6 +43,9 @@ htmlcov/
 /data/
 *.db
 *.sqlite
+*.xlsx
+*.xls
+*.csv
 
 # Logs
 *.log

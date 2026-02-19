@@ -5,8 +5,8 @@ Parses engine log workbooks with multi-tier merged headers (3-4 rows).
 Uses column-index-based mapping instead of header parsing, since the
 merged header structure is fragile across vessels and reporting periods.
 
-Designed for the ECOMAR engine log format (E log sheet), but validates
-layout fingerprints before parsing so incompatible formats fail early.
+Designed for a standard MR tanker engine log format (E log sheet), but
+validates layout fingerprints before parsing so incompatible formats fail early.
 """
 
 import logging
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Column index map for E log sheet
 # ---------------------------------------------------------------------------
-# Based on ECOMAR GARONNE format. Indices are 0-based pandas column positions
+# Based on standard MR tanker E-log format. Indices are 0-based pandas column positions
 # when read with header=None.
 
 COLUMN_MAP: Dict[str, int] = {
