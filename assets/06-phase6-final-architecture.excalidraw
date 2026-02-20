@@ -1,0 +1,608 @@
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "mcp-excalidraw-server",
+  "elements": [
+    {
+      "id": "mlv35fcqwn75ynziedh",
+      "type": "text",
+      "x": 300,
+      "y": 20,
+      "strokeColor": "#1e1e1e",
+      "text": "WINDMAR — Phase 6: Final Architecture",
+      "fontSize": 28,
+      "createdAt": "2026-02-20T16:09:42.651Z",
+      "updatedAt": "2026-02-20T16:09:42.651Z",
+      "version": 1
+    },
+    {
+      "id": "mlv35fcq4oynz945569",
+      "type": "text",
+      "x": 300,
+      "y": 55,
+      "strokeColor": "#666666",
+      "text": "main.py: 6,922 → 281 LOC  |  9 domain routers  |  92 endpoints",
+      "fontSize": 14,
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1
+    },
+    {
+      "id": "main",
+      "type": "rectangle",
+      "x": 340,
+      "y": 100,
+      "width": 260,
+      "height": 80,
+      "backgroundColor": "#a5d8ff",
+      "strokeColor": "#1971c2",
+      "label": {
+        "text": "main.py (281 LOC)\nApp factory + startup"
+      },
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1
+    },
+    {
+      "id": "state",
+      "type": "rectangle",
+      "x": 50,
+      "y": 100,
+      "width": 220,
+      "height": 60,
+      "backgroundColor": "#d0bfff",
+      "strokeColor": "#6741d9",
+      "label": {
+        "text": "state.py\nVesselState + AppState"
+      },
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1
+    },
+    {
+      "id": "wxsvc",
+      "type": "rectangle",
+      "x": 50,
+      "y": 180,
+      "width": 220,
+      "height": 60,
+      "backgroundColor": "#d0bfff",
+      "strokeColor": "#6741d9",
+      "label": {
+        "text": "weather_service.py\nField fetchers + cache"
+      },
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1
+    },
+    {
+      "id": "flm",
+      "type": "rectangle",
+      "x": 50,
+      "y": 260,
+      "width": 220,
+      "height": 60,
+      "backgroundColor": "#d0bfff",
+      "strokeColor": "#6741d9",
+      "label": {
+        "text": "forecast_layer_manager.py\n6 layer singletons"
+      },
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1
+    },
+    {
+      "id": "schemas",
+      "type": "rectangle",
+      "x": 670,
+      "y": 100,
+      "width": 220,
+      "height": 60,
+      "backgroundColor": "#d0bfff",
+      "strokeColor": "#6741d9",
+      "label": {
+        "text": "schemas/ (8 files)\n37 Pydantic models"
+      },
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1
+    },
+    {
+      "id": "mlv35fcq34teojqmi6c",
+      "type": "text",
+      "x": 100,
+      "y": 350,
+      "strokeColor": "#1e1e1e",
+      "text": "Domain Routers (api/routers/)",
+      "fontSize": 18,
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1
+    },
+    {
+      "id": "r_wx",
+      "type": "rectangle",
+      "x": 50,
+      "y": 390,
+      "width": 200,
+      "height": 55,
+      "backgroundColor": "#a5d8ff",
+      "strokeColor": "#1971c2",
+      "label": {
+        "text": "weather.py (2510 LOC)\n31 endpoints"
+      },
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1
+    },
+    {
+      "id": "r_vessel",
+      "type": "rectangle",
+      "x": 270,
+      "y": 390,
+      "width": 200,
+      "height": 55,
+      "backgroundColor": "#ffd8a8",
+      "strokeColor": "#e8590c",
+      "label": {
+        "text": "vessel.py (580 LOC)\n15 endpoints"
+      },
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1
+    },
+    {
+      "id": "r_voyage",
+      "type": "rectangle",
+      "x": 490,
+      "y": 390,
+      "width": 200,
+      "height": 55,
+      "backgroundColor": "#b2f2bb",
+      "strokeColor": "#2f9e44",
+      "label": {
+        "text": "voyage.py (320 LOC)\n3 endpoints"
+      },
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1
+    },
+    {
+      "id": "r_opt",
+      "type": "rectangle",
+      "x": 710,
+      "y": 390,
+      "width": 200,
+      "height": 55,
+      "backgroundColor": "#b2f2bb",
+      "strokeColor": "#2f9e44",
+      "label": {
+        "text": "optimization.py (310 LOC)\n2 endpoints"
+      },
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1
+    },
+    {
+      "id": "r_zones",
+      "type": "rectangle",
+      "x": 50,
+      "y": 465,
+      "width": 200,
+      "height": 55,
+      "backgroundColor": "#ffec99",
+      "strokeColor": "#e67700",
+      "label": {
+        "text": "zones.py (220 LOC)\n7 endpoints"
+      },
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1
+    },
+    {
+      "id": "r_cii",
+      "type": "rectangle",
+      "x": 270,
+      "y": 465,
+      "width": 200,
+      "height": 55,
+      "backgroundColor": "#ffec99",
+      "strokeColor": "#e67700",
+      "label": {
+        "text": "cii.py (220 LOC)\n5 endpoints"
+      },
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1
+    },
+    {
+      "id": "r_sys",
+      "type": "rectangle",
+      "x": 490,
+      "y": 465,
+      "width": 200,
+      "height": 55,
+      "backgroundColor": "#ffec99",
+      "strokeColor": "#e67700",
+      "label": {
+        "text": "system.py (230 LOC)\n8 endpoints"
+      },
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1
+    },
+    {
+      "id": "r_elog",
+      "type": "rectangle",
+      "x": 710,
+      "y": 465,
+      "width": 200,
+      "height": 55,
+      "backgroundColor": "#ffd8a8",
+      "strokeColor": "#e8590c",
+      "label": {
+        "text": "engine_log.py (290 LOC)\n5 endpoints"
+      },
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1
+    },
+    {
+      "id": "r_routes",
+      "type": "rectangle",
+      "x": 50,
+      "y": 540,
+      "width": 200,
+      "height": 55,
+      "backgroundColor": "#ffec99",
+      "strokeColor": "#e67700",
+      "label": {
+        "text": "routes.py (100 LOC)\n2 endpoints"
+      },
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1
+    },
+    {
+      "id": "mlv35fcqp5y7k2xta3i",
+      "type": "arrow",
+      "x": 417.82991944613843,
+      "y": 185.24124173030182,
+      "width": 0,
+      "height": 200,
+      "strokeColor": "#1971c2",
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -230.0742533066913,
+          199.51751653939638
+        ]
+      ],
+      "endArrowhead": "arrow",
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1,
+      "startBinding": {
+        "elementId": "main",
+        "focus": 0,
+        "gap": 8
+      },
+      "endBinding": {
+        "elementId": "r_wx",
+        "focus": 0,
+        "gap": 8
+      }
+    },
+    {
+      "id": "mlv35fcqkoc7nyar7ys",
+      "type": "arrow",
+      "x": 452.8734289887708,
+      "y": 187.5262345561611,
+      "width": 0,
+      "height": 200,
+      "strokeColor": "#e8590c",
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -70.25136248204609,
+          194.94753088767777
+        ]
+      ],
+      "endArrowhead": "arrow",
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1,
+      "startBinding": {
+        "elementId": "main",
+        "focus": 0,
+        "gap": 8
+      },
+      "endBinding": {
+        "elementId": "r_vessel",
+        "focus": 0,
+        "gap": 8
+      }
+    },
+    {
+      "id": "mlv35fcqrwbimgj5gsl",
+      "type": "arrow",
+      "x": 490.47258650278104,
+      "y": 187.34285628768114,
+      "width": 0,
+      "height": 200,
+      "strokeColor": "#2f9e44",
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          84.46023239984333,
+          195.31428742463774
+        ]
+      ],
+      "endArrowhead": "arrow",
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1,
+      "startBinding": {
+        "elementId": "main",
+        "focus": 0,
+        "gap": 8
+      },
+      "endBinding": {
+        "elementId": "r_voyage",
+        "focus": 0,
+        "gap": 8
+      }
+    },
+    {
+      "id": "mlv35fcqbpfwmzh4eu",
+      "type": "arrow",
+      "x": 525.2067541876745,
+      "y": 185.0584537855285,
+      "width": 0,
+      "height": 200,
+      "strokeColor": "#2f9e44",
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          244.90180693996626,
+          199.88309242894297
+        ]
+      ],
+      "endArrowhead": "arrow",
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1,
+      "startBinding": {
+        "elementId": "main",
+        "focus": 0,
+        "gap": 8
+      },
+      "endBinding": {
+        "elementId": "r_opt",
+        "focus": 0,
+        "gap": 8
+      }
+    },
+    {
+      "id": "mlv35fcqcjh2oxipus6",
+      "type": "arrow",
+      "x": 332.0041590852824,
+      "y": 135.54852126081553,
+      "width": -60,
+      "height": 0,
+      "strokeColor": "#6741d9",
+      "strokeStyle": "dashed",
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -54.00831817056485,
+          -1.742203811953658
+        ]
+      ],
+      "endArrowhead": "arrow",
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1,
+      "startBinding": {
+        "elementId": "main",
+        "focus": 0,
+        "gap": 8
+      },
+      "endBinding": {
+        "elementId": "state",
+        "focus": 0,
+        "gap": 8
+      }
+    },
+    {
+      "id": "mlv35fcq9s1c1m0prud",
+      "type": "arrow",
+      "x": 607.9958409147176,
+      "y": 135.54852126081556,
+      "width": 60,
+      "height": 0,
+      "strokeColor": "#6741d9",
+      "strokeStyle": "dashed",
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          54.008318170564735,
+          -1.7422038119536865
+        ]
+      ],
+      "endArrowhead": "arrow",
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1,
+      "startBinding": {
+        "elementId": "main",
+        "focus": 0,
+        "gap": 8
+      },
+      "endBinding": {
+        "elementId": "schemas",
+        "focus": 0,
+        "gap": 8
+      }
+    },
+    {
+      "id": "mlv35fcq0vkorvlipqkp",
+      "type": "text",
+      "x": 50,
+      "y": 620,
+      "strokeColor": "#666666",
+      "text": "Legend:",
+      "fontSize": 14,
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1
+    },
+    {
+      "id": "mlv35fcqt5grxzxlzaq",
+      "type": "rectangle",
+      "x": 110,
+      "y": 615,
+      "width": 20,
+      "height": 20,
+      "backgroundColor": "#a5d8ff",
+      "strokeColor": "#1971c2",
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1
+    },
+    {
+      "id": "mlv35fcqv6b2bouuiy",
+      "type": "text",
+      "x": 135,
+      "y": 618,
+      "strokeColor": "#666666",
+      "text": "Core / Weather",
+      "fontSize": 12,
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1
+    },
+    {
+      "id": "mlv35fcq9iaq0d1bo75",
+      "type": "rectangle",
+      "x": 260,
+      "y": 615,
+      "width": 20,
+      "height": 20,
+      "backgroundColor": "#ffd8a8",
+      "strokeColor": "#e8590c",
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1
+    },
+    {
+      "id": "mlv35fcqua5hkb6mrkm",
+      "type": "text",
+      "x": 285,
+      "y": 618,
+      "strokeColor": "#666666",
+      "text": "Stateful (mutates state)",
+      "fontSize": 12,
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1
+    },
+    {
+      "id": "mlv35fcqs64k1sr74e8",
+      "type": "rectangle",
+      "x": 460,
+      "y": 615,
+      "width": 20,
+      "height": 20,
+      "backgroundColor": "#b2f2bb",
+      "strokeColor": "#2f9e44",
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1
+    },
+    {
+      "id": "mlv35fcqb5nfrmon3k6",
+      "type": "text",
+      "x": 485,
+      "y": 618,
+      "strokeColor": "#666666",
+      "text": "Optimization",
+      "fontSize": 12,
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1
+    },
+    {
+      "id": "mlv35fcqunn0hrm084g",
+      "type": "rectangle",
+      "x": 600,
+      "y": 615,
+      "width": 20,
+      "height": 20,
+      "backgroundColor": "#ffec99",
+      "strokeColor": "#e67700",
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1
+    },
+    {
+      "id": "mlv35fcqq175rjefnsh",
+      "type": "text",
+      "x": 625,
+      "y": 618,
+      "strokeColor": "#666666",
+      "text": "Stateless",
+      "fontSize": 12,
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1
+    },
+    {
+      "id": "mlv35fcq98ywjdndfv9",
+      "type": "rectangle",
+      "x": 730,
+      "y": 615,
+      "width": 20,
+      "height": 20,
+      "backgroundColor": "#d0bfff",
+      "strokeColor": "#6741d9",
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1
+    },
+    {
+      "id": "mlv35fcqyq8db7h3r4l",
+      "type": "text",
+      "x": 755,
+      "y": 618,
+      "strokeColor": "#666666",
+      "text": "Shared services",
+      "fontSize": 12,
+      "createdAt": "2026-02-20T16:09:42.652Z",
+      "updatedAt": "2026-02-20T16:09:42.652Z",
+      "version": 1
+    }
+  ],
+  "appState": {
+    "viewBackgroundColor": "#ffffff",
+    "gridSize": null
+  }
+}
