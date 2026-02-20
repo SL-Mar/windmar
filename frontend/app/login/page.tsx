@@ -64,11 +64,7 @@ export default function LoginPage() {
       <div className="w-full max-w-sm">
         {/* Logo */}
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-500/10 border border-blue-500/20 mb-4">
-            <svg className="w-8 h-8 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
-            </svg>
-          </div>
+          <img src="/windmar-logo.png" alt="WindMar" className="w-16 h-16 rounded-2xl mb-4 inline-block" />
           <h1 className="text-xl font-bold text-white">WindMar</h1>
           <p className="text-sm text-slate-400 mt-1">Weather Routing &amp; Performance Analytics Demo</p>
         </div>
@@ -112,7 +108,7 @@ export default function LoginPage() {
         </form>
 
         <p className="text-center text-xs text-slate-500 mt-4">
-          Ask for a key: <a href="mailto:windmar@slmar.co" className="text-blue-400 hover:underline">windmar@slmar.co</a>
+          Ask for a key: <a href="mailto:contact@slmar.co" className="text-blue-400 hover:underline">contact@slmar.co</a>
         </p>
       </div>
     </div>
