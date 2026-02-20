@@ -92,8 +92,6 @@ A maritime route optimization platform for Medium Range (MR) Product Tankers. Mi
 
 ## Architecture
 
-**[Interactive architecture diagram](https://excalidraw.com/#json=n0xP0fgNrzq-lvWIhBn5M,tqU3CTYYf7f01IANArq2yw)** (Excalidraw) | [Source file](assets/architecture.excalidraw)
-
 ```
 windmar/
 ├── api/                           # FastAPI backend
