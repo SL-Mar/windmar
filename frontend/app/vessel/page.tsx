@@ -50,7 +50,7 @@ export default function VesselPage() {
         <div className="flex space-x-1 mb-6 bg-maritime-medium/50 backdrop-blur-sm rounded-lg p-1 max-w-2xl">
           <TabButton label="Specifications" active={activeTab === 'specifications'} onClick={() => setActiveTab('specifications')} />
           <TabButton label="Calibration" active={activeTab === 'calibration'} onClick={() => setActiveTab('calibration')} />
-          {!DEMO_MODE && <TabButton label="Model" active={activeTab === 'model'} onClick={() => setActiveTab('model')} />}
+          <TabButton label="Model" active={activeTab === 'model'} onClick={() => setActiveTab('model')} />
           <TabButton label="Fuel Analysis" active={activeTab === 'fuel'} onClick={() => setActiveTab('fuel')} />
         </div>
 

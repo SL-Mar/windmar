@@ -100,18 +100,22 @@ export default function MapOverlayControls({
         active={weatherLayer === 'ice'}
         onClick={() => onWeatherLayerChange(weatherLayer === 'ice' ? 'none' : 'ice')}
       />
+      {!DEMO_MODE && (
       <OverlayButton
         icon={<CloudFog className="w-4 h-4" />}
         label="Visibility"
         active={weatherLayer === 'visibility'}
         onClick={() => onWeatherLayerChange(weatherLayer === 'visibility' ? 'none' : 'visibility')}
       />
+      )}
+      {!DEMO_MODE && (
       <OverlayButton
         icon={<Thermometer className="w-4 h-4" />}
         label="SST"
         active={weatherLayer === 'sst'}
         onClick={() => onWeatherLayerChange(weatherLayer === 'sst' ? 'none' : 'sst')}
       />
+      )}
       <OverlayButton
         icon={<AudioWaveform className="w-4 h-4" />}
         label="Swell"
@@ -126,7 +130,7 @@ export default function MapOverlayControls({
           onClick={onForecastToggle}
         />
       )}
-      {weatherLayer !== 'none' && (
+      {weatherLayer !== 'none' && !DEMO_MODE && (
         <button
           onClick={onResync}
           disabled={isLoadingWeather || resyncRunning}

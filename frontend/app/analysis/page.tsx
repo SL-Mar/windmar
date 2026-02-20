@@ -251,7 +251,7 @@ function AnalysisPage() {
         )}
 
         {/* ── SOG Profile & ETA Comparison ── */}
-        {!DEMO_MODE && analysis.optimizations && Object.keys(analysis.optimizations).length > 0 && (
+        {analysis.optimizations && Object.keys(analysis.optimizations).length > 0 && (
           <div className="mb-8">
             <ProfileCharts
               baseline={analysis.result}
