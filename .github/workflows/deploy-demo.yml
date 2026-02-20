@@ -106,11 +106,16 @@ jobs:
               sleep 5
             done
 
-            # Apply engine log seed (self-contained: CREATE TABLE IF NOT EXISTS + data)
+            # Apply engine log seed via docker cp (avoids stdin pipe issues over SSH)
             if [ -f data/demo-engine-log-seed.sql ]; then
-              echo "Applying engine log seed data..."
-              docker exec -i windmar-db psql -U windmar -d windmar < data/demo-engine-log-seed.sql
+              echo "Copying seed SQL into DB container..."
+              docker cp data/demo-engine-log-seed.sql windmar-db:/tmp/seed.sql
+              echo "Executing seed SQL..."
+              docker exec windmar-db psql -U windmar -d windmar -f /tmp/seed.sql
               echo "Seed exit code: $?"
+            else
+              echo "WARNING: data/demo-engine-log-seed.sql not found!"
+              ls -la data/ || echo "data/ directory does not exist"
             fi
 
             sleep 10
