@@ -118,6 +118,40 @@ CREATE TRIGGER update_vessel_specs_updated_at BEFORE UPDATE ON vessel_specs
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 -- ============================================================================
+-- Weather Forecast Snapshot Tables (used by demo mode)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS weather_forecast_runs (
+    id SERIAL PRIMARY KEY,
+    source VARCHAR(20) NOT NULL,
+    run_time TIMESTAMP WITH TIME ZONE NOT NULL,
+    ingested_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    status VARCHAR(20) DEFAULT 'ingesting',
+    grid_resolution FLOAT NOT NULL,
+    lat_min FLOAT, lat_max FLOAT, lon_min FLOAT, lon_max FLOAT,
+    forecast_hours INTEGER[],
+    metadata JSONB,
+    UNIQUE(source, run_time)
+);
+
+CREATE TABLE IF NOT EXISTS weather_grid_data (
+    id SERIAL PRIMARY KEY,
+    run_id INTEGER NOT NULL REFERENCES weather_forecast_runs(id) ON DELETE CASCADE,
+    forecast_hour INTEGER NOT NULL,
+    parameter VARCHAR(30) NOT NULL,
+    lats BYTEA NOT NULL,
+    lons BYTEA NOT NULL,
+    data BYTEA NOT NULL,
+    shape_rows INTEGER NOT NULL,
+    shape_cols INTEGER NOT NULL,
+    UNIQUE(run_id, forecast_hour, parameter)
+);
+
+CREATE INDEX idx_grid_data_run_hour ON weather_grid_data(run_id, forecast_hour);
+CREATE INDEX idx_forecast_runs_source_status ON weather_forecast_runs(source, status);
+CREATE INDEX idx_forecast_runs_time ON weather_forecast_runs(run_time DESC);
+
+-- ============================================================================
 -- PRODUCTION SECURITY NOTICE
 -- ============================================================================
 -- API keys must be created manually after deployment using the CLI tool:
