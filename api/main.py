@@ -18,16 +18,11 @@ import json
 import logging
 import math
 import os
-import pickle
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
-try:
-    import redis as redis_lib
-except ImportError:
-    redis_lib = None
 from fastapi import BackgroundTasks, FastAPI, HTTPException, UploadFile, File, Query, Response, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, JSONResponse, StreamingResponse
@@ -64,46 +59,12 @@ from src.routes.rtz_parser import (
 )
 from src.data.land_mask import is_ocean
 
-# Vectorized ocean mask using global-land-mask's numpy support
-def _build_ocean_mask(lat_min, lat_max, lon_min, lon_max, step=0.05):
-    """Build high-res ocean mask using vectorized numpy calls (fast)."""
-    mask_lats = np.arange(lat_min, lat_max + step / 2, step)
-    mask_lons = np.arange(lon_min, lon_max + step / 2, step)
-    lon_grid, lat_grid = np.meshgrid(mask_lons, mask_lats)
-    try:
-        from global_land_mask import globe
-        mask = globe.is_ocean(lat_grid, lon_grid)
-        return mask_lats.tolist(), mask_lons.tolist(), mask.tolist()
-    except ImportError:
-        # Fallback to point-by-point (slow)
-        mask = [
-            [is_ocean(round(float(lat), 2), round(float(lon), 2)) for lon in mask_lons]
-            for lat in mask_lats
-        ]
-        return mask_lats.tolist(), mask_lons.tolist(), mask
 from src.data.copernicus import (
     CopernicusDataProvider, SyntheticDataProvider, GFSDataProvider, WeatherData,
     ClimatologyProvider, UnifiedWeatherProvider, WeatherDataSource
 )
-try:
-    from src.data.db_weather_provider import DbWeatherProvider
-    from src.data.weather_ingestion import WeatherIngestionService
-except ImportError:
-    DbWeatherProvider = None
-    WeatherIngestionService = None
 
 
-def _apply_ocean_mask_velocity(u: np.ndarray, v: np.ndarray, lats: np.ndarray, lons: np.ndarray) -> tuple:
-    """Zero out U/V components over land so leaflet-velocity skips land areas."""
-    try:
-        from global_land_mask import globe
-        lon_grid, lat_grid = np.meshgrid(lons, lats)
-        ocean = globe.is_ocean(lat_grid, lon_grid)
-        u_masked = np.where(ocean, u, 0.0)
-        v_masked = np.where(ocean, v, 0.0)
-        return u_masked, v_masked
-    except ImportError:
-        return u, v
 from src.compliance.cii import (
     CIICalculator, VesselType as CIIVesselType, CIIRating, CIIResult,
     CIIProjection, estimate_cii_from_route, annualize_voyage_cii
@@ -356,456 +317,44 @@ visir_optimizer = VisirOptimizer(vessel_model=current_vessel_model)
 vessel_calibrator = VesselCalibrator(vessel_specs=current_vessel_specs)
 current_calibration: Optional[CalibrationFactors] = None
 
-# Initialize data providers
-# Set CDS env vars so cdsapi.Client() picks them up
-if settings.cdsapi_key:
-    os.environ.setdefault("CDSAPI_URL", settings.cdsapi_url)
-    os.environ.setdefault("CDSAPI_KEY", settings.cdsapi_key)
+# =============================================================================
+# Weather providers + field fetchers (extracted to weather_service.py)
+# Provider instances are created by ApplicationState (api/state.py).
+# Legacy globals kept as shim aliases until Phase 2b.
+# =============================================================================
+from api.state import get_app_state as _get_app_state
 
-# Copernicus provider (attempts real API if configured)
-copernicus_provider = CopernicusDataProvider(
-    cache_dir="data/copernicus_cache",
-    cmems_username=settings.copernicusmarine_service_username,
-    cmems_password=settings.copernicusmarine_service_password,
+_app_state = _get_app_state()
+_wx = _app_state.weather_providers
+
+# Shim aliases — endpoints still reference these names directly
+copernicus_provider = _wx['copernicus']
+climatology_provider = _wx['climatology']
+unified_weather_provider = _wx['unified']
+synthetic_provider = _wx['synthetic']
+gfs_provider = _wx['gfs']
+db_weather = _wx.get('db_weather')
+weather_ingestion = _wx.get('weather_ingestion')
+
+from api.weather_service import (  # noqa: E402
+    get_wind_field,
+    get_wave_field,
+    get_current_field,
+    get_sst_field,
+    get_visibility_field,
+    get_ice_field,
+    get_weather_at_point,
+    weather_provider,
+    supplement_temporal_wind as _supplement_temporal_wind,
+    build_ocean_mask as _build_ocean_mask,
+    apply_ocean_mask_velocity as _apply_ocean_mask_velocity,
+    reset_voyage_data_sources,
+    get_voyage_data_sources,
+    CACHE_TTL_MINUTES,
 )
 
-# Climatology provider (for beyond-forecast-horizon)
-climatology_provider = ClimatologyProvider(cache_dir="data/climatology_cache")
-
-# Unified provider (blends forecast + climatology)
-unified_weather_provider = UnifiedWeatherProvider(
-    copernicus=copernicus_provider,
-    climatology=climatology_provider,
-    cache_dir="data/weather_cache",
-)
-
-# Synthetic fallback provider (always works)
-synthetic_provider = SyntheticDataProvider()
-
-# GFS near-real-time wind provider (NOAA, updated every 6h)
-gfs_provider = GFSDataProvider(cache_dir="data/gfs_cache")
-
-# =============================================================================
-# Redis Shared Cache (replaces per-worker in-memory dict)
-# =============================================================================
-CACHE_TTL_MINUTES = 60
-_redis_client = None  # Optional[redis.Redis]
-
-def _get_redis():
-    """Lazy-init Redis client. Returns None if unavailable."""
-    global _redis_client
-    if redis_lib is None:
-        return None
-    if _redis_client is not None:
-        return _redis_client
-    try:
-        redis_url = os.environ.get("REDIS_URL", settings.redis_url)
-        _redis_client = redis_lib.Redis.from_url(redis_url, decode_responses=False)
-        _redis_client.ping()
-        logger.info("Redis connected for weather cache")
-        return _redis_client
-    except Exception as e:
-        logger.warning(f"Redis unavailable, falling back to in-memory cache: {e}")
-        return None
-
-# Fallback in-memory cache (used only when Redis is down)
-_weather_cache: Dict[str, WeatherData] = {}
-_cache_expiry: Dict[str, datetime] = {}
-
-def _redis_cache_get(key: str) -> Optional[WeatherData]:
-    """Get from Redis, falling back to in-memory."""
-    r = _get_redis()
-    if r is not None:
-        try:
-            data = r.get(f"wx:{key}")
-            if data:
-                return pickle.loads(data)
-        except Exception:
-            pass
-    # Fallback to in-memory
-    if key in _weather_cache and key in _cache_expiry and datetime.utcnow() < _cache_expiry[key]:
-        return _weather_cache[key]
-    return None
-
-def _redis_cache_put(key: str, data: WeatherData, ttl_seconds: int = 900):
-    """Put to Redis, falling back to in-memory."""
-    r = _get_redis()
-    if r is not None:
-        try:
-            r.setex(f"wx:{key}", ttl_seconds, pickle.dumps(data))
-            return
-        except Exception:
-            pass
-    # Fallback to in-memory
-    _weather_cache[key] = data
-    _cache_expiry[key] = datetime.utcnow() + timedelta(seconds=ttl_seconds)
-
-# =============================================================================
-# Database Weather Provider
-# =============================================================================
-_db_url = os.environ.get("DATABASE_URL", settings.database_url)
-db_weather = None
-weather_ingestion = None
-
-if _db_url.startswith("postgresql") and DbWeatherProvider is not None:
-    db_weather = DbWeatherProvider(_db_url)
-    weather_ingestion = WeatherIngestionService(_db_url, copernicus_provider, gfs_provider)
-
-
-# ============================================================================
-# Helper Functions
-# ============================================================================
-
-def _get_cache_key(data_type: str, lat_min: float, lat_max: float, lon_min: float, lon_max: float) -> str:
-    """Generate cache key for weather data."""
-    return f"{data_type}_{lat_min:.1f}_{lat_max:.1f}_{lon_min:.1f}_{lon_max:.1f}"
-
-
-def _supplement_temporal_wind(
-    temporal_wx,
-    lat_min: float, lat_max: float,
-    lon_min: float, lon_max: float,
-    departure: datetime,
-) -> bool:
-    """Inject GFS wind snapshot into a temporal provider that lacks wind grids.
-
-    Fetches a single GFS forecast-hour-0 wind field from NOAA (fast, ~2-5s)
-    and injects wind_u / wind_v into the temporal provider's grids so that
-    wind resistance is included in calculations.
-
-    Returns True if wind was successfully injected.
-    """
-    import time as _time
-    t0 = _time.monotonic()
-    try:
-        wind_data = gfs_provider.fetch_wind_data(
-            lat_min, lat_max, lon_min, lon_max, departure, forecast_hour=0
-        )
-        if wind_data is None or wind_data.u_component is None:
-            logger.warning("GFS wind supplement: fetch returned None — wind resistance unavailable")
-            return False
-
-        # Convert WeatherData to GridDict format: {forecast_hour: (lats_1d, lons_1d, data_2d)}
-        lats = wind_data.lats
-        lons = wind_data.lons
-        temporal_wx.grids["wind_u"] = {0: (lats, lons, wind_data.u_component)}
-        temporal_wx.grids["wind_v"] = {0: (lats, lons, wind_data.v_component)}
-        temporal_wx._sorted_hours["wind_u"] = [0]
-        temporal_wx._sorted_hours["wind_v"] = [0]
-
-        logger.info(
-            f"GFS wind supplement injected: {len(lats)}x{len(lons)} grid in {_time.monotonic()-t0:.1f}s"
-        )
-        return True
-    except Exception as e:
-        logger.warning(f"GFS wind supplement failed: {e}")
-        return False
-
-
-def get_wind_field(
-    lat_min: float, lat_max: float,
-    lon_min: float, lon_max: float,
-    resolution: float = 1.0,
-    time: datetime = None
-) -> WeatherData:
-    """
-    Get wind field data.
-
-    Provider chain: Redis cache → DB (pre-ingested) → GFS live → ERA5 → Synthetic.
-    """
-    if time is None:
-        time = datetime.utcnow()
-
-    cache_key = _get_cache_key("wind", lat_min, lat_max, lon_min, lon_max)
-
-    # Check Redis/in-memory cache
-    cached = _redis_cache_get(cache_key)
-    if cached is not None:
-        logger.debug(f"Using cached wind data for {cache_key}")
-        return cached
-
-    # Try DB first (pre-ingested grids — sub-second)
-    if db_weather is not None:
-        wind_data, _ = db_weather.get_wind_from_db(lat_min, lat_max, lon_min, lon_max, time)
-        if wind_data is not None:
-            logger.info("Using DB pre-ingested wind data")
-            _redis_cache_put(cache_key, wind_data, CACHE_TTL_MINUTES * 60)
-            return wind_data
-
-    # Try GFS live (near-real-time, ~3.5h lag)
-    wind_data = gfs_provider.fetch_wind_data(lat_min, lat_max, lon_min, lon_max, time)
-    if wind_data is not None:
-        logger.info("Using GFS near-real-time wind data")
-    else:
-        # Fall back to ERA5 (reanalysis, ~5-day lag)
-        wind_data = copernicus_provider.fetch_wind_data(lat_min, lat_max, lon_min, lon_max, time)
-        if wind_data is not None:
-            logger.info("GFS unavailable, using ERA5 reanalysis wind data")
-        else:
-            # Final fallback: synthetic
-            logger.info("GFS and ERA5 unavailable, using synthetic wind data")
-            wind_data = synthetic_provider.generate_wind_field(
-                lat_min, lat_max, lon_min, lon_max, resolution, time
-            )
-
-    _redis_cache_put(cache_key, wind_data, CACHE_TTL_MINUTES * 60)
-    return wind_data
-
-
-def get_wave_field(
-    lat_min: float, lat_max: float,
-    lon_min: float, lon_max: float,
-    resolution: float = 1.0,
-    wind_data: WeatherData = None,
-) -> WeatherData:
-    """
-    Get wave field data.
-
-    Provider chain: Redis cache → DB (pre-ingested) → CMEMS live → Synthetic.
-    """
-    cache_key = _get_cache_key("wave", lat_min, lat_max, lon_min, lon_max)
-
-    cached = _redis_cache_get(cache_key)
-    if cached is not None:
-        logger.debug(f"Using cached wave data for {cache_key}")
-        return cached
-
-    # Try DB first
-    if db_weather is not None:
-        wave_data, _ = db_weather.get_wave_from_db(lat_min, lat_max, lon_min, lon_max)
-        if wave_data is not None:
-            logger.info("Using DB pre-ingested wave data")
-            _redis_cache_put(cache_key, wave_data, CACHE_TTL_MINUTES * 60)
-            return wave_data
-
-    # Try CMEMS live
-    wave_data = copernicus_provider.fetch_wave_data(lat_min, lat_max, lon_min, lon_max)
-
-    if wave_data is None:
-        logger.info("Copernicus wave data unavailable, using synthetic data")
-        wave_data = synthetic_provider.generate_wave_field(
-            lat_min, lat_max, lon_min, lon_max, resolution, wind_data
-        )
-
-    _redis_cache_put(cache_key, wave_data, CACHE_TTL_MINUTES * 60)
-    return wave_data
-
-
-def get_current_field(
-    lat_min: float, lat_max: float,
-    lon_min: float, lon_max: float,
-    resolution: float = 1.0,
-) -> WeatherData:
-    """
-    Get ocean current field.
-
-    Provider chain: Redis cache → DB (pre-ingested) → CMEMS live → Synthetic.
-    """
-    cache_key = _get_cache_key("current", lat_min, lat_max, lon_min, lon_max)
-
-    cached = _redis_cache_get(cache_key)
-    if cached is not None:
-        return cached
-
-    # Try DB first
-    if db_weather is not None:
-        current_data, _ = db_weather.get_current_from_db(lat_min, lat_max, lon_min, lon_max)
-        if current_data is not None:
-            logger.info("Using DB pre-ingested current data")
-            _redis_cache_put(cache_key, current_data, CACHE_TTL_MINUTES * 60)
-            return current_data
-
-    # Try CMEMS live
-    current_data = copernicus_provider.fetch_current_data(lat_min, lat_max, lon_min, lon_max)
-
-    if current_data is None:
-        logger.info("CMEMS current data unavailable, using synthetic data")
-        current_data = synthetic_provider.generate_current_field(
-            lat_min, lat_max, lon_min, lon_max, resolution
-        )
-
-    _redis_cache_put(cache_key, current_data, CACHE_TTL_MINUTES * 60)
-    return current_data
-
-
-def get_sst_field(
-    lat_min: float, lat_max: float,
-    lon_min: float, lon_max: float,
-    resolution: float = 1.0,
-    time: datetime = None,
-) -> WeatherData:
-    """
-    Get SST field data.
-
-    Provider chain: CMEMS live → Synthetic.
-    """
-    if time is None:
-        time = datetime.utcnow()
-
-    cache_key = _get_cache_key("sst", lat_min, lat_max, lon_min, lon_max)
-    cached = _redis_cache_get(cache_key)
-    if cached is not None:
-        return cached
-
-    sst_data = copernicus_provider.fetch_sst_data(lat_min, lat_max, lon_min, lon_max, time)
-    if sst_data is None:
-        logger.info("CMEMS SST unavailable, using synthetic data")
-        sst_data = synthetic_provider.generate_sst_field(
-            lat_min, lat_max, lon_min, lon_max, resolution, time
-        )
-
-    _redis_cache_put(cache_key, sst_data, CACHE_TTL_MINUTES * 60)
-    return sst_data
-
-
-def get_visibility_field(
-    lat_min: float, lat_max: float,
-    lon_min: float, lon_max: float,
-    resolution: float = 1.0,
-    time: datetime = None,
-) -> WeatherData:
-    """
-    Get visibility field data.
-
-    Provider chain: GFS live → Synthetic.
-    """
-    if time is None:
-        time = datetime.utcnow()
-
-    cache_key = _get_cache_key("visibility", lat_min, lat_max, lon_min, lon_max)
-    cached = _redis_cache_get(cache_key)
-    if cached is not None:
-        return cached
-
-    vis_data = gfs_provider.fetch_visibility_data(lat_min, lat_max, lon_min, lon_max, time)
-    if vis_data is None:
-        logger.info("GFS visibility unavailable, using synthetic data")
-        vis_data = synthetic_provider.generate_visibility_field(
-            lat_min, lat_max, lon_min, lon_max, resolution, time
-        )
-
-    _redis_cache_put(cache_key, vis_data, CACHE_TTL_MINUTES * 60)
-    return vis_data
-
-
-def get_ice_field(
-    lat_min: float, lat_max: float,
-    lon_min: float, lon_max: float,
-    resolution: float = 1.0,
-    time: datetime = None,
-) -> WeatherData:
-    """
-    Get sea ice concentration field.
-
-    Provider chain: Redis → DB → CMEMS live → Synthetic.
-    """
-    if time is None:
-        time = datetime.utcnow()
-
-    cache_key = _get_cache_key("ice", lat_min, lat_max, lon_min, lon_max)
-    cached = _redis_cache_get(cache_key)
-    if cached is not None:
-        return cached
-
-    # Try PostgreSQL (from previous ice forecast ingestion)
-    if db_weather is not None:
-        ice_data, _ = db_weather.get_ice_from_db(lat_min, lat_max, lon_min, lon_max, time)
-        if ice_data is not None:
-            logger.info("Ice data served from DB")
-            _redis_cache_put(cache_key, ice_data, CACHE_TTL_MINUTES * 60)
-            return ice_data
-
-    ice_data = copernicus_provider.fetch_ice_data(lat_min, lat_max, lon_min, lon_max, time)
-    if ice_data is None:
-        logger.info("CMEMS ice data unavailable, using synthetic data")
-        ice_data = synthetic_provider.generate_ice_field(
-            lat_min, lat_max, lon_min, lon_max, resolution, time
-        )
-
-    _redis_cache_put(cache_key, ice_data, CACHE_TTL_MINUTES * 60)
-    return ice_data
-
-
-def get_weather_at_point(lat: float, lon: float, time: datetime) -> Tuple[Dict, Optional[WeatherDataSource]]:
-    """
-    Get weather at a specific point.
-
-    Uses unified provider that blends forecast and climatology.
-
-    Returns:
-        Tuple of (weather_dict, data_source) where data_source indicates
-        whether data is from forecast, climatology, or blended.
-    """
-    try:
-        # Use unified provider - handles forecast/climatology transition
-        point_wx, source = unified_weather_provider.get_weather_at_point(lat, lon, time)
-
-        return {
-            'wind_speed_ms': point_wx.wind_speed_ms,
-            'wind_dir_deg': point_wx.wind_dir_deg,
-            'sig_wave_height_m': point_wx.wave_height_m,
-            'wave_period_s': point_wx.wave_period_s,
-            'wave_dir_deg': point_wx.wave_dir_deg,
-            'current_speed_ms': point_wx.current_speed_ms,
-            'current_dir_deg': point_wx.current_dir_deg,
-        }, source
-
-    except Exception as e:
-        logger.warning(f"Unified provider failed, falling back to grid method: {e}")
-
-        # Fallback to direct grid method
-        margin = 2.0
-        lat_min, lat_max = lat - margin, lat + margin
-        lon_min, lon_max = lon - margin, lon + margin
-
-        wind_data = get_wind_field(lat_min, lat_max, lon_min, lon_max, 0.5, time)
-        wave_data = get_wave_field(lat_min, lat_max, lon_min, lon_max, 0.5, wind_data)
-        current_data = get_current_field(lat_min, lat_max, lon_min, lon_max)
-
-        point_wx = copernicus_provider.get_weather_at_point(
-            lat, lon, time, wind_data, wave_data, current_data
-        )
-
-        return {
-            'wind_speed_ms': point_wx.wind_speed_ms,
-            'wind_dir_deg': point_wx.wind_dir_deg,
-            'sig_wave_height_m': point_wx.wave_height_m,
-            'wave_period_s': point_wx.wave_period_s,
-            'wave_dir_deg': point_wx.wave_dir_deg,
-            'current_speed_ms': point_wx.current_speed_ms,
-            'current_dir_deg': point_wx.current_dir_deg,
-        }, None
-
-
-# Track data sources for each leg during voyage calculation
-_voyage_data_sources: List[Dict] = []
-
-
-def weather_provider(lat: float, lon: float, time: datetime) -> LegWeather:
-    """Weather provider function for voyage calculator."""
-    global _voyage_data_sources
-
-    wx, source = get_weather_at_point(lat, lon, time)
-
-    # Track data source for this leg
-    if source:
-        _voyage_data_sources.append({
-            'lat': lat,
-            'lon': lon,
-            'time': time.isoformat(),
-            'source': source.source,
-            'forecast_weight': source.forecast_weight,
-            'message': source.message,
-        })
-
-    return LegWeather(
-        wind_speed_ms=wx['wind_speed_ms'],
-        wind_dir_deg=wx['wind_dir_deg'],
-        sig_wave_height_m=wx['sig_wave_height_m'],
-        wave_period_s=wx.get('wave_period_s', 5.0 + wx['sig_wave_height_m']),
-        wave_dir_deg=wx['wave_dir_deg'],
-    )
-
+# Backward compat: get_voyage_data_sources() was a module-level list in main.py.
+# Endpoints that referenced it now use get_voyage_data_sources().
 
 # ============================================================================
 # API Endpoints - Core
@@ -4006,8 +3555,6 @@ async def calculate_voyage(request: VoyageRequest):
     - Blended: Transition from forecast to climatology (days 10-12)
     - Climatology: ERA5 monthly averages beyond forecast horizon
     """
-    global _voyage_data_sources
-
     if len(request.waypoints) < 2:
         raise HTTPException(status_code=400, detail="At least 2 waypoints required")
 
@@ -4022,7 +3569,7 @@ async def calculate_voyage(request: VoyageRequest):
     route = create_route_from_waypoints(wps, "Voyage Route")
 
     # Reset data source tracking
-    _voyage_data_sources = []
+    reset_voyage_data_sources()
 
     # Pre-fetch weather grids for entire route bounding box
     # Try temporal (time-varying) weather first, fall back to single-snapshot
@@ -4101,9 +3648,8 @@ async def calculate_voyage(request: VoyageRequest):
 
         # Wrapper that tracks data sources per leg
         def tracked_weather_provider(lat: float, lon: float, time: datetime):
-            global _voyage_data_sources
             leg_wx = wx_callable(lat, lon, time)
-            _voyage_data_sources.append({
+            get_voyage_data_sources().append({
                 'lat': lat, 'lon': lon, 'time': time.isoformat(),
                 'source': data_source_type, 'forecast_weight': 1.0,
                 'message': f'{"Temporal" if used_temporal else "Single-snapshot"} grid',
@@ -4122,9 +3668,9 @@ async def calculate_voyage(request: VoyageRequest):
     logger.info(f"Voyage calculation completed in {_time.monotonic()-t_start:.1f}s: {len(result.legs)} legs, {result.total_distance_nm:.0f}nm, {result.total_fuel_mt:.1f}mt fuel")
 
     # Build data source summary
-    forecast_legs = sum(1 for ds in _voyage_data_sources if ds['source'] == 'forecast')
-    blended_legs = sum(1 for ds in _voyage_data_sources if ds['source'] == 'blended')
-    climatology_legs = sum(1 for ds in _voyage_data_sources if ds['source'] == 'climatology')
+    forecast_legs = sum(1 for ds in get_voyage_data_sources() if ds['source'] == 'forecast')
+    blended_legs = sum(1 for ds in get_voyage_data_sources() if ds['source'] == 'blended')
+    climatology_legs = sum(1 for ds in get_voyage_data_sources() if ds['source'] == 'climatology')
 
     data_source_warning = None
     if climatology_legs > 0:
@@ -4150,7 +3696,7 @@ async def calculate_voyage(request: VoyageRequest):
     legs_response = []
     for i, leg in enumerate(result.legs):
         # Get data source info for this leg
-        leg_source = _voyage_data_sources[i] if i < len(_voyage_data_sources) else None
+        leg_source = get_voyage_data_sources()[i] if i < len(get_voyage_data_sources()) else None
 
         legs_response.append(LegResultModel(
             leg_index=leg.leg_index,

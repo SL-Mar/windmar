@@ -29,6 +29,7 @@ class VesselState:
     _specs: Any = None
     _model: Any = None
     _voyage_calculator: Any = None
+    _monte_carlo_sim: Any = None
     _route_optimizer: Any = None
     _visir_optimizer: Any = None
     _calibrator: Any = None
@@ -42,6 +43,7 @@ class VesselState:
         """Initialize default vessel components."""
         from src.optimization.vessel_model import VesselModel, VesselSpecs
         from src.optimization.voyage import VoyageCalculator
+        from src.optimization.monte_carlo import MonteCarloSimulator
         from src.optimization.route_optimizer import RouteOptimizer
         from src.optimization.visir_optimizer import VisirOptimizer
         from src.optimization.vessel_calibration import VesselCalibrator
@@ -49,6 +51,7 @@ class VesselState:
         self._specs = VesselSpecs()
         self._model = VesselModel(specs=self._specs)
         self._voyage_calculator = VoyageCalculator(vessel_model=self._model)
+        self._monte_carlo_sim = MonteCarloSimulator(voyage_calculator=self._voyage_calculator)
         self._route_optimizer = RouteOptimizer(vessel_model=self._model)
         self._visir_optimizer = VisirOptimizer(vessel_model=self._model)
         self._calibrator = VesselCalibrator(vessel_specs=self._specs)
@@ -71,6 +74,12 @@ class VesselState:
         """Get voyage calculator (thread-safe read)."""
         with self._lock:
             return self._voyage_calculator
+
+    @property
+    def monte_carlo_sim(self):
+        """Get Monte Carlo simulator (thread-safe read)."""
+        with self._lock:
+            return self._monte_carlo_sim
 
     @property
     def route_optimizer(self):
@@ -117,6 +126,7 @@ class VesselState:
         """
         from src.optimization.vessel_model import VesselModel, VesselSpecs
         from src.optimization.voyage import VoyageCalculator
+        from src.optimization.monte_carlo import MonteCarloSimulator
         from src.optimization.route_optimizer import RouteOptimizer
         from src.optimization.visir_optimizer import VisirOptimizer
 
@@ -124,6 +134,7 @@ class VesselState:
             self._specs = VesselSpecs(**specs_dict)
             self._model = VesselModel(specs=self._specs)
             self._voyage_calculator = VoyageCalculator(vessel_model=self._model)
+            self._monte_carlo_sim = MonteCarloSimulator(voyage_calculator=self._voyage_calculator)
             self._route_optimizer = RouteOptimizer(vessel_model=self._model)
             self._visir_optimizer = VisirOptimizer(vessel_model=self._model)
 
@@ -138,6 +149,7 @@ class VesselState:
         """
         from src.optimization.vessel_model import VesselModel
         from src.optimization.voyage import VoyageCalculator
+        from src.optimization.monte_carlo import MonteCarloSimulator
         from src.optimization.route_optimizer import RouteOptimizer
         from src.optimization.visir_optimizer import VisirOptimizer
 
@@ -155,6 +167,7 @@ class VesselState:
                 }
             )
             self._voyage_calculator = VoyageCalculator(vessel_model=self._model)
+            self._monte_carlo_sim = MonteCarloSimulator(voyage_calculator=self._voyage_calculator)
             self._route_optimizer = RouteOptimizer(vessel_model=self._model)
             self._visir_optimizer = VisirOptimizer(vessel_model=self._model)
 
@@ -171,6 +184,7 @@ class VesselState:
                 'specs': self._specs,
                 'model': self._model,
                 'voyage_calculator': self._voyage_calculator,
+                'monte_carlo_sim': self._monte_carlo_sim,
                 'route_optimizer': self._route_optimizer,
                 'visir_optimizer': self._visir_optimizer,
                 'calibrator': self._calibrator,
@@ -229,14 +243,26 @@ class ApplicationState:
 
     def _initialize_weather_providers(self):
         """Initialize weather data providers."""
+        import os
+        from api.config import settings
         from src.data.copernicus import (
             CopernicusDataProvider,
             SyntheticDataProvider,
+            GFSDataProvider,
             ClimatologyProvider,
             UnifiedWeatherProvider,
         )
 
-        copernicus = CopernicusDataProvider(cache_dir="data/copernicus_cache")
+        # Set CDS env vars so cdsapi.Client() picks them up
+        if settings.cdsapi_key:
+            os.environ.setdefault("CDSAPI_URL", settings.cdsapi_url)
+            os.environ.setdefault("CDSAPI_KEY", settings.cdsapi_key)
+
+        copernicus = CopernicusDataProvider(
+            cache_dir="data/copernicus_cache",
+            cmems_username=settings.copernicusmarine_service_username,
+            cmems_password=settings.copernicusmarine_service_password,
+        )
         climatology = ClimatologyProvider(cache_dir="data/climatology_cache")
         unified = UnifiedWeatherProvider(
             copernicus=copernicus,
@@ -244,12 +270,31 @@ class ApplicationState:
             cache_dir="data/weather_cache",
         )
         synthetic = SyntheticDataProvider()
+        gfs = GFSDataProvider(cache_dir="data/gfs_cache")
+
+        # DB weather provider (PostgreSQL only)
+        db_weather = None
+        weather_ingestion = None
+        _db_url = os.environ.get("DATABASE_URL", settings.database_url)
+        try:
+            from src.data.db_weather_provider import DbWeatherProvider
+            from src.data.weather_ingestion import WeatherIngestionService
+            if _db_url.startswith("postgresql"):
+                db_weather = DbWeatherProvider(_db_url)
+                weather_ingestion = WeatherIngestionService(
+                    _db_url, copernicus, gfs
+                )
+        except ImportError:
+            pass
 
         self._weather_providers = {
             'copernicus': copernicus,
             'climatology': climatology,
             'unified': unified,
             'synthetic': synthetic,
+            'gfs': gfs,
+            'db_weather': db_weather,
+            'weather_ingestion': weather_ingestion,
         }
 
         logger.info("Weather providers initialized")
