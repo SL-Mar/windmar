@@ -2,7 +2,7 @@
 
 > **Warning**: This project is under active development and is **not production-ready**. It is being built in public as a learning and portfolio project. APIs, data models, and features may change without notice. Do not use for actual voyage planning or navigation.
 
-A weather routing and performance analytics platform for Medium Range (MR) Product Tankers. Optimizes fuel consumption through weather-aware A\* routing, physics-based vessel modeling, engine log analytics, and real-time sensor fusion.
+A weather routing and performance analytics platform for merchant ships. Optimizes fuel consumption through weather-aware A\* routing, physics-based vessel modeling, engine log analytics, and real-time sensor fusion. Ships with a default MR Product Tanker configuration; all vessel parameters are fully configurable.
 
 **Documentation**: [windmar-nav.github.io](https://windmar-nav.github.io)
 
@@ -89,6 +89,27 @@ A weather routing and performance analytics platform for Medium Range (MR) Produ
 - Engine log upload, entries browser, and analytics dashboard
 - CII compliance tracking and projections
 - Dark maritime theme, responsive design
+
+## Screenshots
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/screenshots/weather-wind.png" width="400"><br><strong>Wind Forecast</strong><br>GFS wind particle animation with 5-day forecast timeline</td>
+    <td align="center"><img src="docs/screenshots/weather-ice.png" width="400"><br><strong>Sea Ice</strong><br>Arctic ice concentration overlay from CMEMS</td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screenshots/route-portugal-casquets.png" width="400"><br><strong>Route Optimization</strong><br>Portugal to Casquets — 6 route variants (A* + Dijkstra)</td>
+    <td align="center"><img src="docs/screenshots/vessel-model.png" width="400"><br><strong>Vessel Model</strong><br>Resistance, power, SFOC, and fuel curves with calibration</td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screenshots/engine-log-analytics.png" width="400"><br><strong>Engine Log Analytics</strong><br>Speed-power scatter, fuel distributions, voyage statistics</td>
+    <td align="center"><img src="docs/screenshots/fuel-analysis.png" width="400"><br><strong>Fuel Analysis</strong><br>Physics-based fuel scenarios across loading conditions</td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screenshots/cii-compliance.png" width="400"><br><strong>CII Compliance</strong><br>IMO Carbon Intensity rating with multi-year projection</td>
+    <td align="center"><img src="docs/screenshots/regulations.png" width="400"><br><strong>Regulatory Zones</strong><br>ECA/SECA, TSS, HRA zones with GeoJSON visualization</td>
+  </tr>
+</table>
 
 ## Architecture
 
@@ -199,8 +220,8 @@ windmar/
 ### Docker Compose (recommended)
 
 ```bash
-git clone https://github.com/SL-Mar/Windmar.git
-cd Windmar
+git clone https://github.com/windmar-nav/windmar.git
+cd windmar
 cp .env.example .env    # Edit with your settings
 docker compose up -d --build
 ```
@@ -414,17 +435,17 @@ The system ships with a default MR Product Tanker configuration (all values conf
 | Displacement (laden / ballast) | 65,000 / 20,000 MT |
 | Block coefficient (laden / ballast) | 0.82 / 0.75 |
 | Wetted surface (laden / ballast) | 7,500 / 5,200 m2 |
-| Main Engine MCR | 8,840 kW |
+| Main Engine MCR | 6,600 kW |
 | SFOC at MCR | 171 g/kWh |
-| Service Speed (laden / ballast) | 14.5 / 15.0 knots |
+| Service Speed (laden / ballast) | 13.0 / 13.0 knots |
 | Frontal area (laden / ballast) | 450 / 850 m2 |
 | Lateral area (laden / ballast) | 2,100 / 2,800 m2 |
 
 ## Changelog
 
-### v0.0.9 — Router-Based Architecture Refactoring
+### v0.0.9 — Modular Architecture & Calibration Improvements
 
-Complete structural refactoring of the API layer. Zero endpoint changes, zero test regressions.
+Complete structural refactoring of the API layer plus calibration accuracy improvements. Zero endpoint changes, zero test regressions (426 tests passing).
 
 **Monolith → Modular**
 
@@ -435,6 +456,13 @@ Complete structural refactoring of the API layer. Zero endpoint changes, zero te
 - **WeatherService module** — weather field accessors (wind, wave, current, SST, ice, visibility) extracted from inline endpoint logic
 - **ForecastLayerManager** — deduplicates concurrent prefetch requests, tracks progress per layer, serves cached forecast frames
 - All existing endpoints, URL paths, and response schemas unchanged
+
+**Calibration**
+
+- **ME-specific fuel** — calibration now uses main engine fuel (HFO ME + MGO ME) when available, falling back to total fuel only when ME columns are not reported; previous approach compared predicted ME fuel against total fuel (including auxiliary), biasing the calm water factor
+- **Laden/ballast detection from ME load %** — entries classified by ME load percentage (>55% = laden), enabling correct displacement for resistance calculations; previously all entries were treated as laden
+- **Widened calibration bounds** — calm water factor range expanded from (0.85, 1.5) to (0.6, 1.5), SFOC factor from (0.9, 1.2) to (0.85, 1.2), accommodating vessels where Holtrop-Mennen overpredicts
+- **Engine log deduplication** — duplicate entries (same timestamp) are automatically skipped during upload
 
 ### v0.0.8 — Vessel Model Upgrade, Engine Log Analytics, Optimizer Convergence
 
