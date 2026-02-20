@@ -50,7 +50,7 @@ export default function Header({ onFitRoute }: HeaderProps) {
               <h1 className="text-2xl font-bold maritime-gradient-text">
                 WINDMAR
               </h1>
-              <p className="text-xs text-gray-400">Marine Route Analysis</p>
+              <p className="text-xs text-gray-400">Weather Routing & Performance Analytics</p>
             </div>
           </Link>
 
