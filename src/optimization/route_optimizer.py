@@ -30,7 +30,8 @@ from src.optimization.voyage import LegWeather
 from src.optimization.seakeeping import SafetyConstraints, SafetyStatus, create_default_safety_constraints
 from src.data.land_mask import is_ocean, is_path_clear, get_land_mask_status
 from src.data.regulatory_zones import get_zone_checker, ZoneChecker
-from src.optimization.base_optimizer import BaseOptimizer, OptimizedRoute
+from src.data.strait_waypoints import STRAITS, StraitDefinition
+from src.optimization.base_optimizer import BaseOptimizer, OptimizedRoute, ParetoSolution
 
 logger = logging.getLogger(__name__)
 
@@ -120,8 +121,8 @@ class RouteOptimizer(BaseOptimizer):
     ]
 
     # Speed optimization settings
-    SPEED_RANGE_KTS = (10.0, 16.5)  # Min/max speeds to consider (slow steaming to design+margin)
-    SPEED_STEPS = 7  # Number of speeds to test per leg
+    SPEED_RANGE_KTS = (10.0, 16.0)  # Min/max speeds to consider (slow steaming to design speed)
+    SPEED_STEPS = 13  # Number of speeds to test per leg (0.5 kt increments: 10.0, 10.5, ..., 16.0)
 
     def __init__(
         self,
@@ -133,6 +134,7 @@ class RouteOptimizer(BaseOptimizer):
         zone_checker: Optional[ZoneChecker] = None,
         enforce_zones: bool = True,
         variable_speed: bool = True,  # Enable variable speed optimization
+        variable_resolution: bool = False,  # Enable two-tier grid
     ):
         """
         Initialize route optimizer.
@@ -146,6 +148,7 @@ class RouteOptimizer(BaseOptimizer):
             zone_checker: Regulatory zone checker
             enforce_zones: Whether to apply zone penalties/exclusions
             variable_speed: Enable per-leg speed optimization
+            variable_resolution: Enable two-tier grid (0.5° ocean + 0.1° nearshore)
         """
         super().__init__(vessel_model=vessel_model)
         self.resolution_deg = resolution_deg
@@ -153,6 +156,7 @@ class RouteOptimizer(BaseOptimizer):
         self.enforce_safety = enforce_safety
         self.enforce_zones = enforce_zones
         self.variable_speed = variable_speed
+        self.variable_resolution = variable_resolution
         self.safety_weight: float = 0.0  # 0=pure fuel, 1=full safety penalties
 
         # Safety constraints (seakeeping model)
@@ -227,23 +231,36 @@ class RouteOptimizer(BaseOptimizer):
         self._lambda_time = service_fuel_result['fuel_mt'] * self.TIME_PENALTY_WEIGHT
 
         # Build grid around origin-destination corridor and run A*
-        grid = self._build_grid([origin, destination])
+        if self.variable_resolution:
+            path, cells_explored = self._run_variable_resolution_astar(
+                origin=origin,
+                destination=destination,
+                departure_time=departure_time,
+                calm_speed_kts=calm_speed_kts,
+                is_laden=is_laden,
+                max_cells=max_cells,
+            )
+        else:
+            grid = self._build_grid([origin, destination])
 
-        start_cell = self._get_cell(origin[0], origin[1], grid)
-        end_cell = self._get_cell(destination[0], destination[1], grid)
+            # Inject strait waypoints as direct edges into the grid
+            self._inject_strait_edges(grid)
 
-        if start_cell is None or end_cell is None:
-            raise ValueError("Origin or destination outside grid bounds")
+            start_cell = self._get_cell(origin[0], origin[1], grid)
+            end_cell = self._get_cell(destination[0], destination[1], grid)
 
-        path, cells_explored = self._astar_search(
-            start_cell=start_cell,
-            end_cell=end_cell,
-            grid=grid,
-            departure_time=departure_time,
-            calm_speed_kts=calm_speed_kts,
-            is_laden=is_laden,
-            max_cells=max_cells,
-        )
+            if start_cell is None or end_cell is None:
+                raise ValueError("Origin or destination outside grid bounds")
+
+            path, cells_explored = self._astar_search(
+                start_cell=start_cell,
+                end_cell=end_cell,
+                grid=grid,
+                departure_time=departure_time,
+                calm_speed_kts=calm_speed_kts,
+                is_laden=is_laden,
+                max_cells=max_cells,
+            )
 
         if path is None:
             raise ValueError(f"No route found after exploring {cells_explored} cells")
@@ -359,6 +376,270 @@ class RouteOptimizer(BaseOptimizer):
             baseline_distance_nm=ref_dist,
         )
 
+    def optimize_route_pareto(
+        self,
+        origin: Tuple[float, float],
+        destination: Tuple[float, float],
+        departure_time: datetime,
+        calm_speed_kts: float,
+        is_laden: bool,
+        weather_provider: Callable[[float, float, datetime], LegWeather],
+        max_cells: int = DEFAULT_MAX_CELLS,
+        avoid_land: bool = True,
+        max_time_factor: float = 1.15,
+        baseline_time_hours: Optional[float] = None,
+        baseline_fuel_mt: Optional[float] = None,
+        baseline_distance_nm: Optional[float] = None,
+        route_waypoints: Optional[List[Tuple[float, float]]] = None,
+        lambda_values: Optional[List[float]] = None,
+    ) -> OptimizedRoute:
+        """
+        Run A* with multiple lambda (time penalty) values, return Pareto-optimal set.
+
+        Builds the grid ONCE, then runs A* with each lambda value.
+        Filters dominated solutions to return only the Pareto front.
+        Default selection: lambda closest to 0.3 (current default).
+
+        Args:
+            lambda_values: Time penalty weights to sweep. Default: [0.0, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0]
+            Other args: same as optimize_route()
+
+        Returns:
+            OptimizedRoute with pareto_front populated
+        """
+        import time
+        start_time = time.time()
+
+        if lambda_values is None:
+            lambda_values = [0.0, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0]
+
+        self.weather_provider = weather_provider
+
+        # Compute service-speed fuel rate (used to scale lambda)
+        service_speed = (
+            self.vessel_model.specs.service_speed_laden if is_laden
+            else self.vessel_model.specs.service_speed_ballast
+        )
+        service_fuel_result = self.vessel_model.calculate_fuel_consumption(
+            speed_kts=service_speed,
+            is_laden=is_laden,
+            weather=None,
+            distance_nm=service_speed,
+        )
+        base_fuel_rate = service_fuel_result['fuel_mt']
+
+        # Build grid ONCE
+        grid = self._build_grid([origin, destination])
+        self._inject_strait_edges(grid)
+
+        start_cell = self._get_cell(origin[0], origin[1], grid)
+        end_cell = self._get_cell(destination[0], destination[1], grid)
+
+        if start_cell is None or end_cell is None:
+            raise ValueError("Origin or destination outside grid bounds")
+
+        # Run A* with each lambda value
+        raw_solutions = []
+        for lam in lambda_values:
+            self._lambda_time = base_fuel_rate * lam
+
+            path, cells_explored = self._astar_search(
+                start_cell=start_cell,
+                end_cell=end_cell,
+                grid=grid,
+                departure_time=departure_time,
+                calm_speed_kts=calm_speed_kts,
+                is_laden=is_laden,
+                max_cells=max_cells,
+            )
+
+            if path is None:
+                continue
+
+            waypoints = [(cell.lat, cell.lon) for cell in path]
+            waypoints = self._smooth_path(waypoints)
+            waypoints[0] = origin
+            waypoints[-1] = destination
+
+            # Calculate stats with variable speed
+            fuel, time_h, distance, _, _, speeds = self._calculate_route_stats(
+                waypoints, departure_time, calm_speed_kts, is_laden,
+                use_variable_speed=True,
+            )
+
+            raw_solutions.append(ParetoSolution(
+                lambda_value=lam,
+                fuel_mt=fuel,
+                time_hours=time_h,
+                distance_nm=distance,
+                waypoints=waypoints,
+                speed_profile=speeds,
+            ))
+
+        # Filter to Pareto front
+        pareto = self._pareto_filter(raw_solutions)
+
+        # Mark default selection (lambda closest to 0.3)
+        if pareto:
+            default_idx = min(range(len(pareto)), key=lambda i: abs(pareto[i].lambda_value - 0.3))
+            pareto[default_idx].is_selected = True
+
+        # Use selected solution for top-level fields
+        selected = next((p for p in pareto if p.is_selected), pareto[0] if pareto else None)
+
+        if selected is None:
+            raise ValueError("No valid Pareto solutions found")
+
+        # Restore lambda for stats calculation
+        self._lambda_time = base_fuel_rate * self.TIME_PENALTY_WEIGHT
+
+        # Calculate direct route for comparison
+        direct_wps = list(route_waypoints) if route_waypoints and len(route_waypoints) > 2 else [origin, destination]
+        direct_fuel, direct_time, direct_distance, _, _, _ = self._calculate_route_stats(
+            direct_wps, departure_time, calm_speed_kts, is_laden, use_variable_speed=False
+        )
+
+        # Full stats for selected solution
+        opt_fuel, opt_time, opt_distance, leg_details, safety_summary, speed_profile = (
+            self._calculate_route_stats(
+                selected.waypoints, departure_time, calm_speed_kts, is_laden,
+                use_variable_speed=True,
+            )
+        )
+
+        optimization_time_ms = (time.time() - start_time) * 1000
+
+        fuel_savings = ((direct_fuel - opt_fuel) / direct_fuel * 100) if direct_fuel > 0 else 0
+        time_savings = ((direct_time - opt_time) / direct_time * 100) if direct_time > 0 else 0
+        avg_speed = opt_distance / opt_time if opt_time > 0 else calm_speed_kts
+
+        return OptimizedRoute(
+            waypoints=selected.waypoints,
+            total_fuel_mt=opt_fuel,
+            total_time_hours=opt_time,
+            total_distance_nm=opt_distance,
+            direct_fuel_mt=direct_fuel,
+            direct_time_hours=direct_time,
+            fuel_savings_pct=fuel_savings,
+            time_savings_pct=time_savings,
+            leg_details=leg_details,
+            speed_profile=speed_profile,
+            avg_speed_kts=avg_speed,
+            safety_status=safety_summary['status'],
+            safety_warnings=safety_summary['warnings'],
+            max_roll_deg=safety_summary['max_roll_deg'],
+            max_pitch_deg=safety_summary['max_pitch_deg'],
+            max_accel_ms2=safety_summary['max_accel_ms2'],
+            grid_resolution_deg=self.resolution_deg,
+            cells_explored=cells_explored,
+            optimization_time_ms=optimization_time_ms,
+            variable_speed_enabled=self.variable_speed,
+            pareto_front=pareto,
+            baseline_fuel_mt=baseline_fuel_mt or direct_fuel,
+            baseline_time_hours=baseline_time_hours or direct_time,
+            baseline_distance_nm=baseline_distance_nm or direct_distance,
+        )
+
+    @staticmethod
+    def _pareto_filter(solutions: List[ParetoSolution]) -> List[ParetoSolution]:
+        """
+        Remove dominated solutions from a list.
+
+        A dominates B iff A.fuel <= B.fuel AND A.time <= B.time, with strict < on at least one.
+        Returns the non-dominated subset, sorted by fuel ascending.
+        """
+        if len(solutions) <= 1:
+            return list(solutions)
+
+        non_dominated = []
+        for candidate in solutions:
+            dominated = False
+            for other in solutions:
+                if other is candidate:
+                    continue
+                if (other.fuel_mt <= candidate.fuel_mt and
+                    other.time_hours <= candidate.time_hours and
+                    (other.fuel_mt < candidate.fuel_mt or other.time_hours < candidate.time_hours)):
+                    dominated = True
+                    break
+            if not dominated:
+                non_dominated.append(candidate)
+
+        return sorted(non_dominated, key=lambda s: s.fuel_mt)
+
+    def _run_variable_resolution_astar(
+        self,
+        origin: Tuple[float, float],
+        destination: Tuple[float, float],
+        departure_time: datetime,
+        calm_speed_kts: float,
+        is_laden: bool,
+        max_cells: int,
+    ) -> Tuple[Optional[List[GridCell]], int]:
+        """
+        Run A* on a variable-resolution RoutingGraph (0.5° ocean + 0.1° nearshore).
+
+        Builds a RoutingGraph, converts nodes to GridCell-compatible format,
+        and runs A* using graph.get_neighbors() instead of grid DIRECTIONS.
+        """
+        from src.optimization.routing_graph import RoutingGraph
+
+        # Build variable-resolution graph
+        graph = RoutingGraph([origin, destination])
+        nodes = graph.build()
+
+        if not nodes:
+            raise ValueError("Variable resolution graph has no nodes")
+
+        # Convert to GridCell dict for A* compatibility
+        grid: Dict[Tuple[int, int], GridCell] = {}
+        node_to_key: Dict[str, Tuple[int, int]] = {}
+        key_to_node_id: Dict[Tuple[int, int], str] = {}
+
+        for i, (node_id, node) in enumerate(nodes.items()):
+            key = (i, 0)
+            grid[key] = GridCell(lat=node.lat, lon=node.lon, row=i, col=0)
+            node_to_key[node_id] = key
+            key_to_node_id[key] = node_id
+
+        # Build neighbor lookup: key → list of neighbor keys
+        self._vr_neighbors: Dict[Tuple[int, int], List[Tuple[int, int]]] = {}
+        for node_id, node in nodes.items():
+            key = node_to_key[node_id]
+            self._vr_neighbors[key] = []
+            for nid in node.neighbors:
+                if nid in node_to_key:
+                    self._vr_neighbors[key].append(node_to_key[nid])
+
+        # Find start/end cells
+        start_node = graph.get_nearest_node(origin[0], origin[1])
+        end_node = graph.get_nearest_node(destination[0], destination[1])
+
+        if start_node is None or end_node is None:
+            raise ValueError("Origin or destination not found in variable resolution graph")
+
+        start_key = node_to_key[start_node.id]
+        end_key = node_to_key[end_node.id]
+        start_cell = grid[start_key]
+        end_cell = grid[end_key]
+
+        # Run A* with variable resolution neighbor lookup
+        self._use_vr_neighbors = True
+        try:
+            path, cells_explored = self._astar_search(
+                start_cell=start_cell,
+                end_cell=end_cell,
+                grid=grid,
+                departure_time=departure_time,
+                calm_speed_kts=calm_speed_kts,
+                is_laden=is_laden,
+                max_cells=max_cells,
+            )
+        finally:
+            self._use_vr_neighbors = False
+
+        return path, cells_explored
+
     def _build_grid(
         self,
         corridor_waypoints: List[Tuple[float, float]],
@@ -415,6 +696,93 @@ class RouteOptimizer(BaseOptimizer):
                    f"({row} rows x {col} cols, {land_cells/total_cells*100:.1f}% land)")
 
         return grid
+
+    def _inject_strait_edges(
+        self,
+        grid: Dict[Tuple[int, int], GridCell],
+        threshold_deg: float = 1.0,
+    ) -> int:
+        """
+        Inject strait waypoints into the routing grid as additional cells.
+
+        For each strait whose waypoints fall within the grid bbox,
+        adds waypoint cells and connects them to the nearest existing
+        grid node within threshold_deg. Strait edges between consecutive
+        waypoints are pre-validated and skip is_path_clear during A*.
+
+        Returns the number of strait nodes injected.
+        """
+        if not grid:
+            return 0
+
+        # Get grid bounding box
+        lats = [c.lat for c in grid.values()]
+        lons = [c.lon for c in grid.values()]
+        lat_min, lat_max = min(lats), max(lats)
+        lon_min, lon_max = min(lons), max(lons)
+
+        # Track highest row/col for new node IDs
+        max_row = max(k[0] for k in grid)
+        max_col = max(k[1] for k in grid)
+        next_row = max_row + 100  # Offset to avoid collisions
+
+        injected = 0
+        self._strait_edges: Set[Tuple[Tuple[int, int], Tuple[int, int]]] = set()
+
+        for strait in STRAITS:
+            # Check if any waypoint is within grid bbox (with margin)
+            in_bbox = any(
+                lat_min - 1 <= wlat <= lat_max + 1 and
+                lon_min - 1 <= wlon <= lon_max + 1
+                for wlat, wlon in strait.waypoints
+            )
+            if not in_bbox:
+                continue
+
+            strait_cells = []
+            for i, (wlat, wlon) in enumerate(strait.waypoints):
+                # Create a new grid cell for this waypoint
+                row_id = next_row + injected
+                col_id = 0
+                key = (row_id, col_id)
+
+                cell = GridCell(lat=wlat, lon=wlon, row=row_id, col=col_id)
+                grid[key] = cell
+                strait_cells.append(cell)
+                injected += 1
+
+                # Connect to nearest existing grid node
+                min_dist_sq = threshold_deg ** 2
+                nearest_key = None
+                for gk, gc in grid.items():
+                    if gk == key:
+                        continue
+                    dist_sq = (gc.lat - wlat) ** 2 + (gc.lon - wlon) ** 2
+                    if dist_sq < min_dist_sq:
+                        min_dist_sq = dist_sq
+                        nearest_key = gk
+
+                if nearest_key is not None:
+                    # Mark bidirectional edge (strait node ↔ grid node)
+                    self._strait_edges.add((key, nearest_key))
+                    self._strait_edges.add((nearest_key, key))
+
+            # Mark edges between consecutive strait waypoints (pre-validated)
+            for i in range(len(strait_cells) - 1):
+                k1 = (strait_cells[i].row, strait_cells[i].col)
+                k2 = (strait_cells[i + 1].row, strait_cells[i + 1].col)
+                self._strait_edges.add((k1, k2))
+                if strait.bidirectional:
+                    self._strait_edges.add((k2, k1))
+
+        if injected > 0:
+            logger.info(f"Injected {injected} strait waypoints ({len(self._strait_edges)} edges)")
+
+        return injected
+
+    def _is_strait_edge(self, from_key: Tuple[int, int], to_key: Tuple[int, int]) -> bool:
+        """Check if an edge is a pre-validated strait edge (skips is_path_clear)."""
+        return hasattr(self, '_strait_edges') and (from_key, to_key) in self._strait_edges
 
     def _get_cell(
         self,
@@ -504,10 +872,23 @@ class RouteOptimizer(BaseOptimizer):
                 path.reverse()
                 return path, cells_explored
 
-            # Explore neighbors
-            for dr, dc in self.DIRECTIONS:
-                neighbor_key = (current.cell.row + dr, current.cell.col + dc)
+            # Explore neighbors: variable resolution graph OR grid directions + strait edges
+            neighbor_keys = []
+            if getattr(self, '_use_vr_neighbors', False) and hasattr(self, '_vr_neighbors'):
+                # Variable resolution mode: use graph-based neighbors
+                neighbor_keys = list(self._vr_neighbors.get(current_key, []))
+            else:
+                # Uniform grid mode: 16 directions
+                for dr, dc in self.DIRECTIONS:
+                    neighbor_keys.append((current.cell.row + dr, current.cell.col + dc))
 
+                # Add strait edge neighbors
+                if hasattr(self, '_strait_edges'):
+                    for from_k, to_k in self._strait_edges:
+                        if from_k == current_key and to_k not in [nk for nk in neighbor_keys]:
+                            neighbor_keys.append(to_k)
+
+            for neighbor_key in neighbor_keys:
                 if neighbor_key not in grid:
                     continue
                 if neighbor_key in closed_set:
@@ -515,10 +896,12 @@ class RouteOptimizer(BaseOptimizer):
 
                 neighbor_cell = grid[neighbor_key]
 
-                # Block edges whose straight line crosses land
-                if not is_path_clear(current.cell.lat, current.cell.lon,
-                                     neighbor_cell.lat, neighbor_cell.lon):
-                    continue
+                # Strait edges skip is_path_clear (pre-validated)
+                is_strait = self._is_strait_edge(current_key, neighbor_key)
+                if not is_strait:
+                    if not is_path_clear(current.cell.lat, current.cell.lon,
+                                         neighbor_cell.lat, neighbor_cell.lon):
+                        continue
 
                 # Calculate cost to move to neighbor
                 move_cost, travel_time = self._calculate_move_cost(
