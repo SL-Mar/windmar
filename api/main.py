@@ -257,6 +257,7 @@ from api.routers.voyage import router as voyage_router
 from api.routers.optimization import router as optimization_router
 from api.routers.weather import router as weather_router
 from api.routers.voyage_history import router as voyage_history_router
+from api.routers.charter_party import router as charter_party_router
 app.include_router(zones_router)
 app.include_router(cii_router)
 app.include_router(fueleu_router)
@@ -268,6 +269,7 @@ app.include_router(voyage_router)
 app.include_router(voyage_history_router)
 app.include_router(optimization_router)
 app.include_router(weather_router)
+app.include_router(charter_party_router)
 
 # Initialize application state (thread-safe singleton)
 _ = get_app_state()

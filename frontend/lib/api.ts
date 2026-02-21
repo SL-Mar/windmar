@@ -1145,6 +1145,92 @@ export interface FuelEUPoolingVessel {
   fuel_mt: Record<string, number>;
 }
 
+// Charter Party types
+export interface BeaufortEntry {
+  force: number;
+  wind_min_kts: number;
+  wind_max_kts: number;
+  wave_height_m: number;
+  description: string;
+}
+
+export interface BeaufortScaleResponse {
+  scale: BeaufortEntry[];
+}
+
+export interface LegWeatherInput {
+  wind_speed_kts: number;
+  wave_height_m?: number;
+  current_speed_ms?: number;
+  time_hours: number;
+  distance_nm?: number;
+  sog_kts?: number;
+  fuel_mt?: number;
+}
+
+export interface GoodWeatherLegResponse {
+  leg_index: number;
+  wind_speed_kts: number;
+  wave_height_m: number;
+  current_speed_ms: number;
+  bf_force: number;
+  is_good_weather: boolean;
+  time_hours: number;
+}
+
+export interface GoodWeatherResponse {
+  total_days: number;
+  good_weather_days: number;
+  bad_weather_days: number;
+  good_weather_pct: number;
+  bf_threshold: number;
+  wave_threshold_m: number | null;
+  current_threshold_kts: number | null;
+  legs: GoodWeatherLegResponse[];
+}
+
+export interface WarrantyVerificationResponse {
+  warranted_speed_kts: number;
+  achieved_speed_kts: number;
+  speed_margin_kts: number;
+  speed_compliant: boolean;
+  warranted_consumption_mt_day: number;
+  achieved_consumption_mt_day: number;
+  consumption_margin_mt: number;
+  consumption_compliant: boolean;
+  good_weather_hours: number;
+  total_hours: number;
+  legs_assessed: number;
+  legs_good_weather: number;
+  legs: WarrantyLegDetailResponse[];
+}
+
+export interface WarrantyLegDetailResponse {
+  leg_index: number;
+  sog_kts: number;
+  fuel_mt: number;
+  time_hours: number;
+  distance_nm: number;
+  bf_force: number;
+  is_good_weather: boolean;
+}
+
+export interface OffHireEventResponse {
+  start_time: string;
+  end_time: string;
+  duration_hours: number;
+  reason: string;
+  avg_speed_kts: number | null;
+}
+
+export interface OffHireResponse {
+  total_hours: number;
+  on_hire_hours: number;
+  off_hire_hours: number;
+  off_hire_pct: number;
+  events: OffHireEventResponse[];
+}
+
 // Fuel Analysis types
 export interface FuelScenario {
   name: string;
@@ -2130,6 +2216,30 @@ export const apiClient = {
     if (batchId) params.batch_id = batchId;
     if (daysSinceDrydock !== undefined) params.days_since_drydock = daysSinceDrydock;
     const response = await api.post<EngineLogCalibrateResponse>('/api/engine-log/calibrate', null, { params });
+    return response.data;
+  },
+
+  // -------------------------------------------------------------------------
+  // Charter Party Tools API
+  // -------------------------------------------------------------------------
+
+  async getBeaufortScale(): Promise<BeaufortScaleResponse> {
+    const response = await api.get<BeaufortScaleResponse>('/api/charter-party/beaufort-scale');
+    return response.data;
+  },
+
+  async analyzeGoodWeather(request: { legs: LegWeatherInput[]; bf_threshold?: number; wave_threshold_m?: number; current_threshold_kts?: number }): Promise<GoodWeatherResponse> {
+    const response = await api.post<GoodWeatherResponse>('/api/charter-party/good-weather/from-legs', request);
+    return response.data;
+  },
+
+  async verifyWarranty(request: { legs: LegWeatherInput[]; warranted_speed_kts: number; warranted_consumption_mt_day: number; bf_threshold?: number; speed_tolerance_pct?: number; consumption_tolerance_pct?: number }): Promise<WarrantyVerificationResponse> {
+    const response = await api.post<WarrantyVerificationResponse>('/api/charter-party/verify-warranty/from-legs', request);
+    return response.data;
+  },
+
+  async detectOffHire(request: { date_from?: string; date_to?: string; rpm_threshold?: number; speed_threshold?: number; gap_hours?: number }): Promise<OffHireResponse> {
+    const response = await api.post<OffHireResponse>('/api/charter-party/off-hire', request);
     return response.data;
   },
 };
