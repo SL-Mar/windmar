@@ -400,6 +400,18 @@ class CIICalculator:
             "message": message,
         }
 
+    def get_rating_boundaries_for_year(self, year: int) -> Dict:
+        """Return required CII and A-E boundary values for a specific year."""
+        reduction_factor = self._get_reduction_factor(year)
+        ref_cii = self._calculate_reference_cii()
+        required_cii = ref_cii * (1 - reduction_factor / 100)
+        boundaries = self._calculate_rating_boundaries(required_cii)
+        return {
+            "required_cii": round(required_cii, 4),
+            "boundaries": boundaries,
+            "reduction_factor": reduction_factor,
+        }
+
     def _calculate_co2_emissions(self, fuel_mt: Dict[str, float]) -> float:
         """Calculate total CO2 emissions from fuel consumption."""
         total_co2 = 0.0

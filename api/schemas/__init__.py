@@ -63,6 +63,15 @@ from .cii import (  # noqa: F401
     CIICalculateRequest,
     CIIProjectRequest,
     CIIReductionRequest,
+    CIISpeedSweepRequest,
+    CIISpeedSweepPoint,
+    CIISpeedSweepResponse,
+    CIIThresholdYear,
+    CIIThresholdsResponse,
+    CIIFleetVessel,
+    CIIFleetRequest,
+    CIIFleetResult,
+    CIIFleetResponse,
 )
 
 # Engine Log

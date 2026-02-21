@@ -976,6 +976,81 @@ export interface CIIReductionResponse {
   message: string;
 }
 
+// CII Speed Sweep (Simulator)
+export interface CIISpeedSweepRequest {
+  dwt: number;
+  vessel_type: string;
+  distance_nm: number;
+  voyages_per_year: number;
+  fuel_type: string;
+  year: number;
+  speed_min_kts: number;
+  speed_max_kts: number;
+  speed_step_kts: number;
+  is_laden: boolean;
+}
+
+export interface CIISpeedSweepPoint {
+  speed_kts: number;
+  fuel_per_voyage_mt: number;
+  annual_fuel_mt: number;
+  annual_co2_mt: number;
+  attained_cii: number;
+  required_cii: number;
+  rating: string;
+}
+
+export interface CIISpeedSweepResponse {
+  points: CIISpeedSweepPoint[];
+  optimal_speed_kts: number;
+  rating_boundaries: Record<string, number>;
+}
+
+// CII Thresholds
+export interface CIIThresholdYear {
+  year: number;
+  required_cii: number;
+  boundaries: Record<string, number>;
+  reduction_factor: number;
+}
+
+export interface CIIThresholdsResponse {
+  years: CIIThresholdYear[];
+  vessel_type: string;
+  capacity: number;
+}
+
+// CII Fleet
+export interface CIIFleetVessel {
+  name: string;
+  dwt: number;
+  vessel_type: string;
+  fuel_consumption_mt: Record<string, number>;
+  total_distance_nm: number;
+  year: number;
+  gt?: number;
+}
+
+export interface CIIFleetRequest {
+  vessels: CIIFleetVessel[];
+}
+
+export interface CIIFleetResult {
+  name: string;
+  rating: string;
+  attained_cii: number;
+  required_cii: number;
+  compliance_status: string;
+  total_co2_mt: number;
+  margin_to_downgrade: number;
+  margin_to_upgrade: number;
+}
+
+export interface CIIFleetResponse {
+  results: CIIFleetResult[];
+  summary: Record<string, number>;
+}
+
 // Fuel Analysis types
 export interface FuelScenario {
   name: string;
@@ -1785,6 +1860,21 @@ export const apiClient = {
 
   async calculateCIIReduction(request: CIIReductionRequest): Promise<CIIReductionResponse> {
     const response = await api.post<CIIReductionResponse>('/api/cii/reduction', request);
+    return response.data;
+  },
+
+  async simulateCIISpeed(request: CIISpeedSweepRequest): Promise<CIISpeedSweepResponse> {
+    const response = await api.post<CIISpeedSweepResponse>('/api/cii/speed-sweep', request);
+    return response.data;
+  },
+
+  async getCIIThresholds(params: { dwt: number; vessel_type?: string; gt?: number }): Promise<CIIThresholdsResponse> {
+    const response = await api.get<CIIThresholdsResponse>('/api/cii/thresholds', { params });
+    return response.data;
+  },
+
+  async calculateFleetCII(request: CIIFleetRequest): Promise<CIIFleetResponse> {
+    const response = await api.post<CIIFleetResponse>('/api/cii/fleet', request);
     return response.data;
   },
 
