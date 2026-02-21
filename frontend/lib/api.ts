@@ -605,6 +605,10 @@ export interface OptimizationRequest {
   engine?: 'astar' | 'visir';
   // Safety weight: 0=fuel optimal, 1=safety priority
   safety_weight?: number;
+  // Pareto front: run A* with multiple lambda values
+  pareto?: boolean;
+  // Variable resolution: two-tier grid (0.5° ocean + 0.1° nearshore)
+  variable_resolution?: boolean;
 }
 
 export interface WeatherProvenance {
@@ -656,6 +660,15 @@ export interface SpeedScenario {
   time_savings_pct: number;
 }
 
+export interface ParetoSolution {
+  lambda_value: number;
+  fuel_mt: number;
+  time_hours: number;
+  distance_nm: number;
+  speed_profile: number[];
+  is_selected: boolean;
+}
+
 export interface OptimizationResponse {
   waypoints: Position[];
   total_fuel_mt: number;
@@ -670,6 +683,7 @@ export interface OptimizationResponse {
   speed_profile: number[];  // Optimal speed per leg (kts)
   avg_speed_kts: number;
   variable_speed_enabled: boolean;
+  variable_resolution_enabled?: boolean;
   // Safety assessment
   safety?: SafetySummary;
   // Speed strategy scenarios
@@ -677,6 +691,8 @@ export interface OptimizationResponse {
   baseline_fuel_mt?: number;
   baseline_time_hours?: number;
   baseline_distance_nm?: number;
+  // Pareto front (populated when pareto=true)
+  pareto_front?: ParetoSolution[];
   // Weather provenance
   weather_provenance?: WeatherProvenance[];
   temporal_weather: boolean;

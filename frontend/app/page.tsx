@@ -6,7 +6,7 @@ import Header from '@/components/Header';
 import MapOverlayControls from '@/components/MapOverlayControls';
 import AnalysisPanel from '@/components/AnalysisPanel';
 import { useVoyage } from '@/components/VoyageContext';
-import { apiClient, Position, WindFieldData, WaveFieldData, VelocityData, OptimizationResponse, CreateZoneRequest, WaveForecastFrames, IceForecastFrames, SstForecastFrames, VisForecastFrames, OptimizedRouteKey, AllOptimizationResults, EMPTY_ALL_RESULTS } from '@/lib/api';
+import { apiClient, Position, WindFieldData, WaveFieldData, VelocityData, OptimizationResponse, ParetoSolution, CreateZoneRequest, WaveForecastFrames, IceForecastFrames, SstForecastFrames, VisForecastFrames, OptimizedRouteKey, AllOptimizationResults, EMPTY_ALL_RESULTS } from '@/lib/api';
 import { getAnalyses, saveAnalysis, deleteAnalysis, updateAnalysisMonteCarlo, updateAnalysisOptimizations, AnalysisEntry } from '@/lib/analysisStorage';
 import { debugLog } from '@/lib/debugLog';
 import DebugConsole from '@/components/DebugConsole';
@@ -35,6 +35,9 @@ export default function HomePage() {
   const [isEditing, setIsEditing] = useState(true);
   const [isCalculating, setIsCalculating] = useState(false);
   const [isOptimizing, setIsOptimizing] = useState(false);
+  const [variableResolution, setVariableResolution] = useState(false);
+  const [paretoFront, setParetoFront] = useState<ParetoSolution[] | null>(null);
+  const [isRunningPareto, setIsRunningPareto] = useState(false);
 
   // Per-layer staleness indicator (ISO timestamp from backend)
   const [layerIngestedAt, setLayerIngestedAt] = useState<string | null>(null);
@@ -612,6 +615,7 @@ export default function HomePage() {
       baseline_fuel_mt: displayedAnalysis?.result.total_fuel_mt,
       baseline_time_hours: displayedAnalysis?.result.total_time_hours,
       baseline_distance_nm: displayedAnalysis?.result.total_distance_nm,
+      variable_resolution: variableResolution,
     };
 
     const combos: { engine: 'astar' | 'visir'; weight: number; key: OptimizedRouteKey }[] = [
@@ -654,6 +658,45 @@ export default function HomePage() {
       debugLog('error', 'ROUTE', `All-routes optimization failed: ${error}`);
     } finally {
       setIsOptimizing(false);
+    }
+  };
+
+  // Run Pareto analysis (A* engine only)
+  const handlePareto = async () => {
+    if (waypoints.length < 2) return;
+    setIsRunningPareto(true);
+    setParetoFront(null);
+    const t0 = performance.now();
+    debugLog('info', 'ROUTE', 'Running Pareto analysis...');
+    try {
+      const r = await apiClient.optimizeRoute({
+        origin: waypoints[0],
+        destination: waypoints[waypoints.length - 1],
+        calm_speed_kts: calmSpeed,
+        is_laden: isLaden,
+        departure_time: departureTime || undefined,
+        optimization_target: 'fuel',
+        grid_resolution_deg: 0.2,
+        max_time_factor: 1.15,
+        route_waypoints: waypoints.length > 2 ? waypoints : undefined,
+        baseline_fuel_mt: displayedAnalysis?.result.total_fuel_mt,
+        baseline_time_hours: displayedAnalysis?.result.total_time_hours,
+        baseline_distance_nm: displayedAnalysis?.result.total_distance_nm,
+        variable_resolution: variableResolution,
+        engine: 'astar',
+        pareto: true,
+      });
+      const resp = r as OptimizationResponse;
+      if (resp.pareto_front && resp.pareto_front.length > 0) {
+        setParetoFront(resp.pareto_front);
+        debugLog('info', 'ROUTE', `Pareto done in ${((performance.now() - t0) / 1000).toFixed(1)}s: ${resp.pareto_front.length} solutions`);
+      } else {
+        debugLog('warn', 'ROUTE', 'Pareto returned no solutions');
+      }
+    } catch (error) {
+      debugLog('error', 'ROUTE', `Pareto analysis failed: ${error}`);
+    } finally {
+      setIsRunningPareto(false);
     }
   };
 
@@ -878,6 +921,11 @@ export default function HomePage() {
                   if (displayedAnalysisId) handleRunSimulation(displayedAnalysisId);
                 }}
                 displayedAnalysis={displayedAnalysis}
+                variableResolution={variableResolution}
+                onVariableResolutionChange={setVariableResolution}
+                paretoFront={paretoFront}
+                isRunningPareto={isRunningPareto}
+                onRunPareto={handlePareto}
               />
             )}
           </MapComponent>

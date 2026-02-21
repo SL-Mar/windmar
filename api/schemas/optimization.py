@@ -37,6 +37,8 @@ class OptimizationRequest(BaseModel):
     safety_weight: float = Field(0.0, ge=0.0, le=1.0, description="Safety penalty weight: 0=fuel optimal, 1=safety priority")
     # Pareto front: when True, run A* with multiple lambda values and return Pareto-optimal set
     pareto: bool = Field(False, description="Return Pareto front of fuel/time trade-offs")
+    # Variable resolution: when True, use two-tier grid (0.5° ocean + 0.1° nearshore)
+    variable_resolution: bool = Field(False, description="Enable variable resolution grid (fine nearshore, coarse ocean)")
 
 
 class OptimizationLegModel(BaseModel):
@@ -124,6 +126,7 @@ class OptimizationResponse(BaseModel):
 
     # Engine used
     engine: str = "astar"  # "astar" or "visir"
+    variable_resolution_enabled: bool = False
 
     # Safety assessment
     safety: Optional[SafetySummary] = None

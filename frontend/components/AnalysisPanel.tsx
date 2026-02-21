@@ -4,7 +4,7 @@ import { useState, useRef, useEffect } from 'react';
 import {
   Navigation, Clock, Fuel, Ship, Loader2, Trash2,
   Upload, Play, Zap, Dice5, ExternalLink, Eye, EyeOff,
-  PenLine, MapPin, Download, FolderOpen, Check, X, CheckCircle,
+  PenLine, MapPin, Download, FolderOpen, Check, X, CheckCircle, Grid3X3, TrendingUp,
 } from 'lucide-react';
 import Link from 'next/link';
 import RouteImport, { SampleRTZButton } from '@/components/RouteImport';
@@ -13,9 +13,10 @@ import { DEMO_MODE } from '@/lib/demoMode';
 import {
   Position, AllOptimizationResults, OptimizedRouteKey,
   RouteVisibility, ROUTE_STYLES, EMPTY_ALL_RESULTS,
-  CalibrationStatus, apiClient,
+  CalibrationStatus, ParetoSolution, apiClient,
 } from '@/lib/api';
 import { AnalysisEntry } from '@/lib/analysisStorage';
+import ParetoChart from '@/components/ParetoChart';
 
 interface AnalysisPanelProps {
   waypoints: Position[];
@@ -38,6 +39,12 @@ interface AnalysisPanelProps {
   isSimulating: boolean;
   onRunSimulations: () => void;
   displayedAnalysis: AnalysisEntry | null;
+  // Phase 3: Variable resolution + Pareto
+  variableResolution: boolean;
+  onVariableResolutionChange: (v: boolean) => void;
+  paretoFront: ParetoSolution[] | null;
+  isRunningPareto: boolean;
+  onRunPareto: () => void;
 }
 
 const WEIGHT_LABELS: Record<string, string> = { fuel: 'Fuel', balanced: 'Balanced', safety: 'Safety' };
@@ -63,6 +70,11 @@ export default function AnalysisPanel({
   isSimulating,
   onRunSimulations,
   displayedAnalysis,
+  variableResolution,
+  onVariableResolutionChange,
+  paretoFront,
+  isRunningPareto,
+  onRunPareto,
 }: AnalysisPanelProps) {
   const { departureTime, setDepartureTime, calmSpeed, isLaden } = useVoyage();
   const [showImport, setShowImport] = useState(false);
@@ -300,6 +312,21 @@ export default function AnalysisPanel({
               </div>
             )}
 
+            {/* ── Optimization Options ── */}
+            <label className="flex items-center gap-2 px-2 py-1.5 rounded bg-white/5 text-xs text-gray-400 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={variableResolution}
+                onChange={(e) => onVariableResolutionChange(e.target.checked)}
+                className="accent-ocean-500"
+              />
+              <Grid3X3 className="w-3 h-3" />
+              <span>Variable resolution grid</span>
+              <span className="ml-auto text-[9px] text-gray-600" title="Fine 0.1° nearshore, coarse 0.5° ocean">
+                0.1°/0.5°
+              </span>
+            </label>
+
             {/* ── Optimize Route ── */}
             <button
               onClick={onOptimize}
@@ -411,6 +438,27 @@ export default function AnalysisPanel({
                 </div>
               );
             })()}
+
+            {/* ── Pareto Analysis ── */}
+            {hasRoute && (
+              <button
+                onClick={onRunPareto}
+                disabled={isRunningPareto || isOptimizing}
+                className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-medium bg-white/5 text-gray-300 hover:bg-white/10 transition-colors disabled:opacity-50"
+              >
+                {isRunningPareto ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <TrendingUp className="w-4 h-4" />
+                )}
+                {isRunningPareto ? 'Running Pareto...' : 'Pareto Analysis'}
+              </button>
+            )}
+
+            {/* ── Pareto Chart ── */}
+            {paretoFront && paretoFront.length > 0 && (
+              <ParetoChart solutions={paretoFront} />
+            )}
 
             {/* ── Run Simulations (Monte Carlo) ── */}
             {hasBaseline && (

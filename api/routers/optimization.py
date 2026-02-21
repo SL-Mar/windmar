@@ -83,6 +83,9 @@ def _optimize_route_sync(request: "OptimizationRequest") -> "OptimizationRespons
     )
     active_optimizer.optimization_target = request.optimization_target
     active_optimizer.safety_weight = request.safety_weight
+    # Variable resolution: two-tier grid (A* only, ignored by VISIR)
+    if engine_name != "visir":
+        active_optimizer.variable_resolution = request.variable_resolution
 
     try:
         # ── Temporal weather provisioning (DB-first) ──────────────────
@@ -330,6 +333,7 @@ def _optimize_route_sync(request: "OptimizationRequest") -> "OptimizationRespons
             avg_speed_kts=round(result.avg_speed_kts, 1),
             variable_speed_enabled=result.variable_speed_enabled,
             engine=engine_name,
+            variable_resolution_enabled=request.variable_resolution and engine_name != "visir",
             safety=safety_summary,
             scenarios=scenario_models,
             pareto_front=pareto_models,
